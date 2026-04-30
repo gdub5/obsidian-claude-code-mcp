@@ -18,6 +18,27 @@ const SEARCH_DEFAULT_RESULTS = 50;
 const SEARCH_MAX_FILE_BYTES = 1_000_000;
 /** Total budget for snippet bytes in the response, before MCP framing. */
 const SEARCH_MAX_RESPONSE_BYTES = 256 * 1024;
+/**
+ * Hard cap on files actually opened by a single search. Independent of the
+ * per-file size cap and the response budget — needed because a no-match (or
+ * late-match) query would otherwise traverse the entire vault even when the
+ * per-file and response caps never trip. 5,000 covers most real vaults; a
+ * 50k-note vault gets a partial scan with a "scan budget hit" notice rather
+ * than a 30-second freeze.
+ */
+const SEARCH_MAX_FILES_SCANNED = 5_000;
+/**
+ * Cumulative bytes read across all files in a single search call. Defense
+ * in depth against a vault full of just-under-1MB markdown files (which
+ * would still dump 5GB through the loop before the files-scanned cap
+ * tripped). 50MB is generous for a full-text scan over text files.
+ *
+ * Note on time-based limits: deliberately not used. Wall-clock budgets are
+ * non-deterministic in tests (CI timing flakes) and depend on system load
+ * in production. Counting work directly gives the same protection without
+ * those drawbacks.
+ */
+const SEARCH_MAX_BYTES_SCANNED = 50 * 1024 * 1024;
 
 // ──────────────────────────────────────────────────────────────────────
 // Tool definitions
@@ -388,7 +409,10 @@ export class MetadataTools {
 
 						const hits: Array<{ path: string; line: number; snippet: string }> = [];
 						let bytesUsed = 0;
-						let truncatedByBudget = false;
+						let truncatedByResponseBudget = false;
+						let truncatedByScanBudget: false | "files" | "bytes" = false;
+						let filesScanned = 0;
+						let bytesScanned = 0;
 
 						// Markdown-only — skip PDFs / images / audio / canvas etc.
 						// Falls back to getFiles() if the API is missing (older
@@ -400,6 +424,19 @@ export class MetadataTools {
 
 						outer: for (const file of files) {
 							if (hits.length >= cap) break;
+
+							// Scan budgets — these fire even on a no-match
+							// query, where neither the result cap nor the
+							// response-byte budget can trip. Without these
+							// a 50k-note vault would still get fully traversed.
+							if (filesScanned >= SEARCH_MAX_FILES_SCANNED) {
+								truncatedByScanBudget = "files";
+								break;
+							}
+							if (bytesScanned >= SEARCH_MAX_BYTES_SCANNED) {
+								truncatedByScanBudget = "bytes";
+								break;
+							}
 
 							// Skip files larger than the per-file byte budget.
 							// `stat.size` is set by Obsidian and our mock; treat
@@ -418,12 +455,19 @@ export class MetadataTools {
 									content = await this.app.vault.adapter.read(file.path);
 								}
 							} catch {
-								continue; // unreadable — skip
+								filesScanned++; // count the attempt against the budget
+								continue;
 							}
 
 							// Defense in depth: even if stat lied, don't process
 							// huge content.
-							if (content.length > SEARCH_MAX_FILE_BYTES) continue;
+							if (content.length > SEARCH_MAX_FILE_BYTES) {
+								filesScanned++;
+								continue;
+							}
+
+							filesScanned++;
+							bytesScanned += content.length;
 
 							const lines = content.split("\n");
 							for (let i = 0; i < lines.length; i++) {
@@ -439,7 +483,7 @@ export class MetadataTools {
 								const approxLineBytes =
 									snippet.length + file.path.length + 16;
 								if (bytesUsed + approxLineBytes > SEARCH_MAX_RESPONSE_BYTES) {
-									truncatedByBudget = true;
+									truncatedByResponseBudget = true;
 									break outer;
 								}
 								hits.push({
@@ -452,18 +496,27 @@ export class MetadataTools {
 						}
 
 						const cappedByCount = hits.length >= cap;
-						const truncationNote = truncatedByBudget
-							? `, truncated at ${SEARCH_MAX_RESPONSE_BYTES} byte response budget`
-							: cappedByCount
-								? `, capped at ${cap} results`
-								: "";
+						const truncationNote = truncatedByScanBudget === "files"
+							? `, search incomplete — scan budget hit (${SEARCH_MAX_FILES_SCANNED} files scanned)`
+							: truncatedByScanBudget === "bytes"
+								? `, search incomplete — scan budget hit (${Math.round(SEARCH_MAX_BYTES_SCANNED / (1024 * 1024))}MB read)`
+								: truncatedByResponseBudget
+									? `, truncated at ${SEARCH_MAX_RESPONSE_BYTES} byte response budget`
+									: cappedByCount
+										? `, capped at ${cap} results`
+										: "";
 
+						// If the scan budget tripped on a no-match query, the
+						// caller MUST know the result is incomplete — otherwise
+						// they'll treat it as "definitely no match in vault".
 						const text = hits.length
 							? `Search results for "${query}" (${hits.length}${truncationNote}):\n` +
 								hits
 									.map((h) => `${h.path}:${h.line}: ${h.snippet}`)
 									.join("\n")
-							: `No matches for "${query}".`;
+							: truncatedByScanBudget
+								? `No matches found for "${query}" yet${truncationNote}. The scan was halted before the entire vault was searched — narrow the query to be sure.`
+								: `No matches for "${query}".`;
 
 						return reply({
 							result: {

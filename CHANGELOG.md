@@ -28,7 +28,7 @@ about links, tags, and frontmatter without manually re-parsing notes.
 
 The first cut of `search_vault` was structurally unbounded — a Codex
 adversarial review correctly flagged it as a host-freeze risk on real-
-sized vaults. Four limits now apply:
+sized vaults. Six limits now apply:
 
 1. **`max_results` is clamped** to a hard ceiling of 200 regardless of
    what the caller asks for. Default stays 50.
@@ -40,13 +40,29 @@ sized vaults. Four limits now apply:
 4. **Response byte budget.** Total snippet bytes are tracked as hits
    accumulate; once over 256 KB the loop short-circuits and the response
    labels itself "truncated at the byte budget".
+5. **Files-scanned budget.** Hard cap of 5,000 markdown files visited
+   per call. The first four caps all bound *output*; the second adversarial
+   pass (correctly) noted that a no-match query would still traverse the
+   whole vault. Files-scanned bounds *work*, fires regardless of result
+   count, and surfaces "search incomplete" in the response — the caller
+   can't mistake a halted scan for a complete no-match answer.
+6. **Bytes-scanned budget.** Hard cap of 50 MB cumulative read across
+   all files in a single call. Defense in depth against a vault full of
+   just-under-1 MB markdown files (5,000 such files would otherwise
+   stream ~5 GB through the loop before the file-count cap tripped).
+
+No wall-clock budget. Time-based limits introduce CI flakiness and
+depend on system load; counting work directly is deterministic.
 
 Switched from `vault.adapter.read(path)` to `vault.cachedRead(file)` —
 the canonical read-only API; uses Obsidian's in-memory buffer when the
 file is open.
 
-Four new unit tests pin each safeguard: hard-cap clamping, file-size
-skip, non-markdown filter, byte-budget truncation.
+Seven new unit tests pin each safeguard: hard-cap clamping, file-size
+skip, non-markdown filter, byte-budget truncation, files-scanned scan
+budget, bytes-scanned scan budget, and a regression guard that small
+no-match queries still produce clean "no matches" output (not a false
+"search incomplete" notice).
 
 Total tool count is now **13** (was 7). All metadata tools are registered
 to both transports (WS + HTTP).

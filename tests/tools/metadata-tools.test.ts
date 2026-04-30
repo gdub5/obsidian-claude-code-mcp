@@ -465,6 +465,62 @@ describe("search_vault", () => {
 		expect(text).not.toContain("image.png");
 	});
 
+	it("stops scanning when the files-scanned budget trips on a no-match query", async () => {
+		// Without the work-budget cap, a no-match query would visit every
+		// markdown file in the vault. Codex's adversarial review correctly
+		// identified that the original four caps only bound *output*, not
+		// *work* — this test pins the work cap.
+		const { vault, handlers } = setup();
+		// 5,005 files: just past the 5,000 cap. None contain "needle".
+		for (let i = 0; i < 5005; i++) {
+			vault.__seed(`f${String(i).padStart(5, "0")}.md`, "haystack only");
+		}
+
+		const { reply, calls } = makeReply();
+		await handlers.get("search_vault")!.handler({ query: "needle" }, reply);
+
+		const text = textOf(calls[0]);
+		// Marker present so callers know the answer is incomplete
+		expect(text).toMatch(/scan budget hit|search incomplete/i);
+		// Files-scanned mode specifically (not bytes-scanned)
+		expect(text).toContain("files scanned");
+	});
+
+	it("stops scanning when the cumulative bytes-scanned budget trips", async () => {
+		// Files just under the per-file 1MB cap — enough of them to push
+		// cumulative bytes-scanned past the 50MB cap. Tests that the bytes
+		// budget fires even when the files-count budget doesn't.
+		const { vault, handlers } = setup();
+		const nearCap = "x".repeat(999_000);
+		// 55 × 999KB = ~54MB — past the 50MB cap, well under the 5,000-file cap.
+		for (let i = 0; i < 55; i++) {
+			vault.__seed(`big-${i}.md`, nearCap);
+		}
+
+		const { reply, calls } = makeReply();
+		await handlers.get("search_vault")!.handler({ query: "needle" }, reply);
+
+		const text = textOf(calls[0]);
+		expect(text).toMatch(/scan budget hit|search incomplete/i);
+		expect(text).toContain("MB read");
+	});
+
+	it("no-match + no-budget-trip still says clean 'no matches'", async () => {
+		// Important regression guard: a small vault that no-matches should
+		// keep saying 'No matches' (not 'search incomplete'). The truncation
+		// language is reserved for budget-bounded scans.
+		const { vault, handlers } = setup();
+		vault.__seed("a.md", "haystack only");
+		vault.__seed("b.md", "haystack only");
+
+		const { reply, calls } = makeReply();
+		await handlers.get("search_vault")!.handler({ query: "needle" }, reply);
+
+		const text = textOf(calls[0]).toLowerCase();
+		expect(text).toMatch(/no matches/);
+		expect(text).not.toMatch(/incomplete|scan budget/);
+	});
+
 	it("truncates the response when the byte budget is exceeded", async () => {
 		const { vault, handlers } = setup();
 		// Long lines so each hit eats ~200 bytes — quickly hits the
