@@ -40,11 +40,4 @@ export interface Tool {
 	};
 }
 
-export interface WorkspaceInfo {
-	name: string;
-	path: string;
-	fileCount: number;
-	type: string;
-}
-
 export type McpReplyFunction = (msg: Omit<McpResponse, "jsonrpc" | "id">) => void;

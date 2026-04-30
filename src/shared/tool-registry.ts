@@ -37,24 +37,29 @@ export class ToolRegistry {
 	): Promise<void> {
 		const { name, arguments: args } = req.params || {};
 
+		if (!name || typeof name !== "string") {
+			return reply({
+				error: {
+					code: -32602,
+					message: "tools/call requires a string `name` parameter",
+				},
+			});
+		}
+
 		const tool = this.tools.get(name);
 		if (!tool) {
 			console.error(`[ToolRegistry] Unknown tool called: ${name}`, args);
 			return reply({
-				result: {
-					content: [
-						{
-							type: "text",
-							text: `Tool '${name}' is not registered`,
-						},
-					],
+				error: {
+					code: -32602,
+					message: `Unknown tool: ${name}`,
 				},
 			});
 		}
 
 		try {
 			await tool.implementation.handler(args, reply);
-		} catch (error) {
+		} catch (error: any) {
 			reply({
 				error: {
 					code: -32603,

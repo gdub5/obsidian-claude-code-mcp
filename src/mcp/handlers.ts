@@ -1,7 +1,6 @@
 import { App } from "obsidian";
 import { WebSocket } from "ws";
 import { McpRequest, McpReplyFunction } from "./types";
-import { FileTools } from "../tools/file-tools";
 import { WorkspaceManager } from "../obsidian/workspace-manager";
 import { ToolRegistry } from "../shared/tool-registry";
 import { IdeHandler } from "../ide/ide-handler";
@@ -11,26 +10,37 @@ export interface HttpMcpReplyFunction {
 	(msg: Omit<import("./types").McpResponse, "jsonrpc" | "id">): void;
 }
 
+const PROTOCOL_VERSION = "2024-11-05";
+const SERVER_NAME = "obsidian-claude-code-mcp";
+
 export class McpHandlers {
-	private fileTools: FileTools;
-	private wsToolRegistry: ToolRegistry;  // WebSocket/IDE tools
-	private httpToolRegistry: ToolRegistry; // HTTP/MCP tools
+	private wsToolRegistry: ToolRegistry;
+	private httpToolRegistry: ToolRegistry;
 	private ideHandler: IdeHandler;
+	private serverVersion: string;
 
 	constructor(
 		private app: App,
 		wsToolRegistry: ToolRegistry,
 		httpToolRegistry: ToolRegistry,
-		workspaceManager?: WorkspaceManager
+		workspaceManager?: WorkspaceManager,
+		serverVersion = "0.0.0-dev"
 	) {
-		this.fileTools = new FileTools(app);
 		this.wsToolRegistry = wsToolRegistry;
 		this.httpToolRegistry = httpToolRegistry;
 		this.ideHandler = new IdeHandler(app, workspaceManager);
+		this.serverVersion = serverVersion;
 	}
 
 	async handleRequest(sock: WebSocket, req: McpRequest): Promise<void> {
 		console.debug(`[MCP] Handling request: ${req.method}`, req.params);
+
+		// Notifications (no `id` field) get no reply, per JSON-RPC 2.0.
+		if (!isRequest(req)) {
+			console.debug(`[MCP] Notification received: ${req.method}`);
+			return;
+		}
+
 		const reply: McpReplyFunction = (msg) => {
 			const response = JSON.stringify({
 				jsonrpc: "2.0",
@@ -44,7 +54,6 @@ export class McpHandlers {
 			sock.send(response);
 		};
 
-		// WebSocket requests use the WebSocket tool registry
 		return this.handleRequestGeneric(req, reply, "ws");
 	}
 
@@ -53,7 +62,13 @@ export class McpHandlers {
 		reply: HttpMcpReplyFunction
 	): Promise<void> {
 		console.debug(`[MCP HTTP] Handling request: ${req.method}`, req.params);
-		// HTTP requests use the HTTP tool registry
+
+		// Notifications get no reply.
+		if (!isRequest(req)) {
+			console.debug(`[MCP HTTP] Notification received: ${req.method}`);
+			return;
+		}
+
 		return this.handleRequestGeneric(req, reply, "http");
 	}
 
@@ -68,7 +83,6 @@ export class McpHandlers {
 			if (handled) return;
 		}
 
-		// Handle standard MCP methods
 		switch (req.method) {
 			case "initialize":
 				return this.handleInitialize(req, reply);
@@ -76,82 +90,49 @@ export class McpHandlers {
 			case "tools/list":
 				return this.handleToolsList(req, reply, source);
 
-			case "prompts/list":
-				return this.handlePromptsList(req, reply);
-
 			case "ping":
-				return reply({ result: "pong" });
+				return reply({ result: {} });
 
-			// Legacy file operation methods (for backward compatibility)
-			case "readFile":
-				return this.fileTools.handleReadFile(req, reply);
-
-			case "writeFile":
-				return this.fileTools.handleWriteFile(req, reply);
-
-			case "getOpenFiles":
-				return this.fileTools.handleGetOpenFiles(req, reply);
-
-			case "listFiles":
-				return this.fileTools.handleListFiles(req, reply);
-
-			case "getCurrentFile":
-				return this.fileTools.handleGetCurrentFile(req, reply);
-
-			case "getWorkspaceInfo":
-				return this.handleGetWorkspaceInfo(req, reply);
-
-			// Standard MCP tool call
-			case "tools/call":
-				// Use the appropriate tool registry based on request source
-				const toolRegistry = source === "ws" ? this.wsToolRegistry : this.httpToolRegistry;
+			case "tools/call": {
+				const toolRegistry =
+					source === "ws" ? this.wsToolRegistry : this.httpToolRegistry;
 				return toolRegistry.handleToolCall(req, reply);
-
-			case "resources/list":
-				return this.handleResourcesList(req, reply);
+			}
 
 			default:
-				console.error(`[MCP] Unknown method called: ${req.method}`, req.params);
+				console.error(
+					`[MCP] Unknown method called: ${req.method}`,
+					req.params
+				);
 				return reply({
-					error: { code: -32601, message: "method not implemented" },
+					error: { code: -32601, message: "Method not found" },
 				});
 		}
 	}
 
 	private async handleInitialize(
-		req: McpRequest,
+		_req: McpRequest,
 		reply: McpReplyFunction | HttpMcpReplyFunction
 	): Promise<void> {
 		try {
-			const { protocolVersion, capabilities, clientInfo } =
-				req.params || {};
-
-			// Respond with server capabilities
 			reply({
 				result: {
-					protocolVersion: "2024-11-05",
+					protocolVersion: PROTOCOL_VERSION,
 					capabilities: {
-						roots: {
-							listChanged: false,
-						},
+						// Only advertise capabilities we actually implement.
+						// `roots` is a CLIENT capability per spec.
+						// `prompts` and `resources` are not implemented yet.
 						tools: {
-							listChanged: false,
-						},
-						resources: {
-							subscribe: false,
-							listChanged: false,
-						},
-						prompts: {
 							listChanged: false,
 						},
 					},
 					serverInfo: {
-						name: "obsidian-claude-code-mcp",
-						version: "1.0.0",
+						name: SERVER_NAME,
+						version: this.serverVersion,
 					},
 				},
 			});
-		} catch (error) {
+		} catch (error: any) {
 			reply({
 				error: {
 					code: -32603,
@@ -161,22 +142,17 @@ export class McpHandlers {
 		}
 	}
 
-
 	private async handleToolsList(
-		req: McpRequest,
+		_req: McpRequest,
 		reply: McpReplyFunction | HttpMcpReplyFunction,
 		source: "ws" | "http"
 	): Promise<void> {
 		try {
-			// Use the appropriate tool registry based on request source
-			const toolRegistry = source === "ws" ? this.wsToolRegistry : this.httpToolRegistry;
+			const toolRegistry =
+				source === "ws" ? this.wsToolRegistry : this.httpToolRegistry;
 			const tools = toolRegistry.getToolDefinitions();
-			reply({
-				result: {
-					tools: tools,
-				},
-			});
-		} catch (error) {
+			reply({ result: { tools } });
+		} catch (error: any) {
 			reply({
 				error: {
 					code: -32603,
@@ -185,75 +161,12 @@ export class McpHandlers {
 			});
 		}
 	}
+}
 
-	private async handlePromptsList(
-		req: McpRequest,
-		reply: McpReplyFunction | HttpMcpReplyFunction
-	): Promise<void> {
-		try {
-			reply({
-				result: {
-					prompts: [],
-				},
-			});
-		} catch (error) {
-			reply({
-				error: {
-					code: -32603,
-					message: `failed to list prompts: ${error.message}`,
-				},
-			});
-		}
-	}
-
-	private async handleResourcesList(
-		req: McpRequest,
-		reply: McpReplyFunction | HttpMcpReplyFunction
-	): Promise<void> {
-		try {
-			// Obsidian doesn't have the same resource concept as other IDEs
-			// Return empty resources list
-			console.debug(`[MCP] Resources list requested`);
-			reply({
-				result: {
-					resources: [],
-				},
-			});
-		} catch (error) {
-			reply({
-				error: {
-					code: -32603,
-					message: `failed to list resources: ${error.message}`,
-				},
-			});
-		}
-	}
-
-	private async handleGetWorkspaceInfo(
-		req: McpRequest,
-		reply: McpReplyFunction | HttpMcpReplyFunction
-	): Promise<void> {
-		try {
-			const vaultName = this.app.vault.getName();
-			const basePath =
-				(this.app.vault.adapter as any).getBasePath?.() || "unknown";
-			const fileCount = this.app.vault.getFiles().length;
-
-			reply({
-				result: {
-					name: vaultName,
-					path: basePath,
-					fileCount,
-					type: "obsidian-vault",
-				},
-			});
-		} catch (error) {
-			reply({
-				error: {
-					code: -32603,
-					message: `failed to get workspace info: ${error.message}`,
-				},
-			});
-		}
-	}
+/**
+ * A JSON-RPC message is a request (vs notification) iff it carries an `id`.
+ * The spec allows id to be a string or number; null is reserved/discouraged.
+ */
+function isRequest(msg: McpRequest): boolean {
+	return msg.id !== undefined && msg.id !== null;
 }

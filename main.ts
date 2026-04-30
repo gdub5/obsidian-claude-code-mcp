@@ -11,6 +11,7 @@ import {
 	ClaudeCodeSettings,
 	DEFAULT_SETTINGS,
 	ClaudeCodeSettingTab,
+	ensureAuthToken,
 } from "./src/settings";
 import claudeLogo from "./assets/claude-logo.png";
 
@@ -70,6 +71,8 @@ export default class ClaudeMcpPlugin extends Plugin {
 				httpPort: this.settings.mcpHttpPort,
 				enableWebSocket: this.settings.enableWebSocketServer,
 				enableHttp: this.settings.enableHttpServer,
+				serverVersion: this.manifest.version,
+				authToken: this.settings.mcpAuthToken,
 			});
 
 			// Start services
@@ -296,6 +299,12 @@ export default class ClaudeMcpPlugin extends Plugin {
 			DEFAULT_SETTINGS,
 			await this.loadData()
 		);
+		// Ensure an auth token exists. Generated on first install or after
+		// upgrading from a pre-auth version. Persist immediately so the
+		// servers and the lock file see the same value.
+		if (ensureAuthToken(this.settings)) {
+			await this.saveSettings();
+		}
 	}
 
 	async saveSettings() {

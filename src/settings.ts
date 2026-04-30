@@ -1,6 +1,7 @@
 import { App, PluginSettingTab, Setting, Notice } from "obsidian";
 import ClaudeMcpPlugin from "../main";
 import { getClaudeConfigDir } from "./claude-config";
+import { generateToken } from "./mcp/auth";
 
 export interface ClaudeCodeSettings {
 	autoCloseTerminalOnClaudeExit: boolean;
@@ -9,6 +10,12 @@ export interface ClaudeCodeSettings {
 	enableWebSocketServer: boolean;
 	enableHttpServer: boolean;
 	enableEmbeddedTerminal: boolean;
+	/**
+	 * Bearer token used to authenticate clients on both transports. Generated
+	 * automatically on first plugin load if empty. The user can rotate it
+	 * from the settings tab.
+	 */
+	mcpAuthToken: string;
 }
 
 export const DEFAULT_SETTINGS: ClaudeCodeSettings = {
@@ -18,7 +25,21 @@ export const DEFAULT_SETTINGS: ClaudeCodeSettings = {
 	enableWebSocketServer: true,
 	enableHttpServer: true,
 	enableEmbeddedTerminal: true,
+	mcpAuthToken: "", // populated on first load
 };
+
+/**
+ * Mutates `settings` in place: ensures `mcpAuthToken` is non-empty,
+ * generating one if needed. Returns true when a new token was minted
+ * (caller should persist).
+ */
+export function ensureAuthToken(settings: ClaudeCodeSettings): boolean {
+	if (!settings.mcpAuthToken || settings.mcpAuthToken.trim() === "") {
+		settings.mcpAuthToken = generateToken();
+		return true;
+	}
+	return false;
+}
 
 export class ClaudeCodeSettingTab extends PluginSettingTab {
 	plugin: ClaudeMcpPlugin;
@@ -110,6 +131,9 @@ export class ClaudeCodeSettingTab extends PluginSettingTab {
 					}
 				});
 			});
+
+		// Authentication Section
+		this.displayAuthSection(containerEl);
 
 		// Terminal Configuration Section
 		containerEl.createEl("h3", { text: "Terminal Configuration" });
@@ -242,7 +266,7 @@ export class ClaudeCodeSettingTab extends PluginSettingTab {
 			});
 			httpDetails.innerHTML = `
 				<div>• SSE Stream: <code>http://localhost:${serverInfo.httpPort}/sse</code></div>
-				<div>• Add to Claude Desktop config: <code>"url": "http://localhost:${serverInfo.httpPort}/sse"</code></div>
+				<div>• Bearer token required — see Authentication section below for full client config</div>
 			`;
 		} else if (!this.plugin.settings.enableHttpServer) {
 			httpStatus.innerHTML = `
@@ -266,6 +290,107 @@ export class ClaudeCodeSettingTab extends PluginSettingTab {
 		});
 		refreshButton.addEventListener("click", () => {
 			this.display(); // Refresh the entire settings display
+		});
+	}
+
+	private displayAuthSection(containerEl: HTMLElement): void {
+		containerEl.createEl("h3", { text: "Authentication" });
+
+		// Build identity — version from manifest plus the build timestamp
+		// injected by esbuild. Lets us tell at a glance which bundle is
+		// actually loaded, since Obsidian sometimes caches plugin code.
+		const buildBox = containerEl.createEl("div", {
+			cls: "setting-item-description",
+		});
+		buildBox.style.marginBottom = "0.75em";
+		buildBox.style.fontFamily = "var(--font-monospace)";
+		buildBox.style.fontSize = "0.85em";
+		buildBox.style.opacity = "0.8";
+		buildBox.setText(
+			`v${this.plugin.manifest.version} · built ${__BUILD_STAMP__}`
+		);
+
+		const desc = containerEl.createEl("div", { cls: "setting-item-description" });
+		desc.createEl("p", {
+			text:
+				"All MCP connections require this bearer token. Claude Code reads it " +
+				"from the lock file automatically. For Claude Desktop / mcp-remote, " +
+				"include it in the configuration shown below.",
+		});
+
+		const token = this.plugin.settings.mcpAuthToken;
+		const port = this.plugin.mcpServer?.getServerInfo()?.httpPort ?? this.plugin.settings.mcpHttpPort;
+
+		// Token field — shown in plain text. The same value appears in the
+		// config snippet below, so masking it here would be theater, not
+		// security. The actual control is the local-machine boundary
+		// (loopback-only HTTP server + lock-file delivery for WS).
+		const tokenSetting = new Setting(containerEl)
+			.setName("Bearer token")
+			.setDesc("Generated automatically. Rotate it if you suspect it has leaked.");
+
+		tokenSetting.addText((text) => {
+			text.setValue(token).setDisabled(true);
+			text.inputEl.style.fontFamily = "var(--font-monospace)";
+			text.inputEl.style.width = "100%";
+		});
+
+		tokenSetting.addButton((btn) => {
+			btn.setButtonText("Copy").onClick(async () => {
+				try {
+					await navigator.clipboard.writeText(token);
+					new Notice("Token copied to clipboard");
+				} catch (err) {
+					new Notice("Failed to copy token");
+				}
+			});
+		});
+
+		tokenSetting.addButton((btn) => {
+			btn.setButtonText("Regenerate")
+				.setWarning()
+				.onClick(async () => {
+					const ok = window.confirm(
+						"Generate a new token? All currently connected Claude clients " +
+							"will be disconnected and must be reconfigured with the new token."
+					);
+					if (!ok) return;
+					this.plugin.settings.mcpAuthToken = generateToken();
+					await this.plugin.saveSettings();
+					await this.plugin.restartMcpServer();
+					new Notice("Auth token regenerated. Update your Claude clients.");
+					this.display();
+				});
+		});
+
+		// Configuration snippet for Claude Desktop / mcp-remote.
+		const cfgContainer = containerEl.createEl("div", { cls: "setting-item-description" });
+		cfgContainer.createEl("p", { text: "Claude Desktop config snippet (claude_desktop_config.json):" });
+		const pre = cfgContainer.createEl("pre");
+		pre.style.userSelect = "text";
+		pre.style.padding = "0.5em";
+		pre.style.backgroundColor = "var(--background-secondary)";
+		pre.style.borderRadius = "4px";
+		pre.style.overflowX = "auto";
+		pre.createEl("code", {
+			text: JSON.stringify(
+				{
+					mcpServers: {
+						obsidian: {
+							command: "npx",
+							args: [
+								"-y",
+								"mcp-remote",
+								`http://localhost:${port}/sse`,
+								"--header",
+								`Authorization: Bearer ${token}`,
+							],
+						},
+					},
+				},
+				null,
+				2
+			),
 		});
 	}
 }

@@ -223,11 +223,12 @@ export class GeneralTools {
 						const normalizedPath = normalizePath(path);
 						if (!normalizedPath) {
 							return reply({
-								error: { code: -32603, message: "invalid file path" },
+								error: { code: -32602, message: "invalid file path" },
 							});
 						}
 
-						// Check if path is a directory by trying to list files
+						// Check if path is a directory by looking for any file
+						// living under it.
 						const allFiles = this.app.vault.getFiles();
 						const isDirectory = allFiles.some(
 							(file) =>
@@ -237,18 +238,30 @@ export class GeneralTools {
 						);
 
 						if (isDirectory || normalizedPath.endsWith("/")) {
-							// List directory contents
-							const dirFiles = allFiles
-								.filter((file) => {
-									const dirPath = normalizedPath.endsWith("/")
-										? normalizedPath
-										: normalizedPath + "/";
-									return (
-										file.path.startsWith(dirPath) &&
-										!file.path.substring(dirPath.length).includes("/")
+							const dirPath = normalizedPath.endsWith("/")
+								? normalizedPath
+								: normalizedPath + "/";
+
+							// Walk every file under dirPath and split into:
+							//   - direct files (no further `/`)
+							//   - subfolder names (everything before the next `/`)
+							// Subfolders get a trailing `/` to distinguish from files.
+							const directFiles: string[] = [];
+							const subfolders = new Set<string>();
+							for (const file of allFiles) {
+								if (!file.path.startsWith(dirPath)) continue;
+								const rest = file.path.substring(dirPath.length);
+								const slashIdx = rest.indexOf("/");
+								if (slashIdx === -1) {
+									directFiles.push(file.path);
+								} else {
+									subfolders.add(
+										dirPath + rest.substring(0, slashIdx) + "/"
 									);
-								})
-								.map((file) => file.path);
+								}
+							}
+
+							const entries = [...subfolders, ...directFiles].sort();
 
 							return reply({
 								result: {
@@ -256,8 +269,8 @@ export class GeneralTools {
 										{
 											type: "text",
 											text:
-												dirFiles.length > 0
-													? `Directory contents:\n${dirFiles.join(
+												entries.length > 0
+													? `Directory contents:\n${entries.join(
 															"\n"
 													  )}`
 													: "Directory is empty or does not exist",
@@ -337,7 +350,7 @@ export class GeneralTools {
 						const normalizedPath = normalizePath(path);
 						if (!normalizedPath) {
 							return reply({
-								error: { code: -32603, message: "invalid file path" },
+								error: { code: -32602, message: "invalid file path" },
 							});
 						}
 
@@ -402,7 +415,7 @@ export class GeneralTools {
 						const normalizedPath = normalizePath(path);
 						if (!normalizedPath) {
 							return reply({
-								error: { code: -32603, message: "invalid file path" },
+								error: { code: -32602, message: "invalid file path" },
 							});
 						}
 
@@ -420,7 +433,31 @@ export class GeneralTools {
 							// File doesn't exist, which is what we want for create
 						}
 
-						await this.app.vault.adapter.write(normalizedPath, file_text);
+						// Ensure the parent folder exists, then create through
+						// the high-level vault.create() API.
+						//
+						// vault.createFolder updates Obsidian's vault tree
+						// (which vault.create consults), so this is the
+						// idiomatic pairing. adapter.write would also work,
+						// but mixing it with vault.createFolder has been
+						// reported to surface ENOENT race conditions —
+						// staying in the vault.* layer avoids that class.
+						//
+						// vault.createFolder errors if the folder already
+						// exists; we swallow only that specific case.
+						const lastSlash = normalizedPath.lastIndexOf("/");
+						if (lastSlash > 0) {
+							const parent = normalizedPath.substring(0, lastSlash);
+							try {
+								await this.app.vault.createFolder(parent);
+							} catch (e: any) {
+								if (!/already exists/i.test(e?.message || "")) {
+									throw e;
+								}
+							}
+						}
+
+						await this.app.vault.create(normalizedPath, file_text);
 
 						return reply({
 							result: {
@@ -432,7 +469,7 @@ export class GeneralTools {
 								],
 							},
 						});
-					} catch (error) {
+					} catch (error: any) {
 						reply({
 							error: {
 								code: -32603,
@@ -461,7 +498,7 @@ export class GeneralTools {
 						const normalizedPath = normalizePath(path);
 						if (!normalizedPath) {
 							return reply({
-								error: { code: -32603, message: "invalid file path" },
+								error: { code: -32602, message: "invalid file path" },
 							});
 						}
 

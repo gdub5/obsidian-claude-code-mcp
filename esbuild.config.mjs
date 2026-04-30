@@ -10,9 +10,17 @@ if you want to view the source, please visit the github repository of this plugi
 
 const prod = process.argv[2] === "production";
 
+// Inject a build stamp so the running plugin can prove which build it is
+// (catches the "wrong plugin folder loaded" / cache-staleness class of bug
+// the disable-then-enable cycle doesn't always reveal).
+const BUILD_STAMP = new Date().toISOString();
+
 const buildOptions = {
 	banner: {
 		js: banner,
+	},
+	define: {
+		__BUILD_STAMP__: JSON.stringify(BUILD_STAMP),
 	},
 	entryPoints: ["main.ts"],
 	bundle: true,

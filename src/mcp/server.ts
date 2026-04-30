@@ -3,12 +3,23 @@ import * as fs from "fs";
 import * as path from "path";
 import { McpRequest, McpNotification } from "./types";
 import { getClaudeIdeDir } from "../claude-config";
+import { extractBearerToken, isAuthorized } from "./auth";
 
 export interface McpServerConfig {
 	onMessage: (ws: WebSocket, request: McpRequest) => void;
 	onConnection?: (ws: WebSocket) => void;
 	onDisconnection?: (ws: WebSocket) => void;
+	/**
+	 * Required token for connecting clients. Must be present and match the
+	 * value Claude Code reads from the lock file. Empty/undefined disables
+	 * the server — we never start an unauthenticated WebSocket.
+	 */
+	authToken: string;
 }
+
+// Header Claude Code sends on the WebSocket upgrade. Lowercased, since
+// Node normalizes incoming headers to lowercase.
+const CLAUDE_AUTH_HEADER = "x-claude-code-ide-authorization";
 
 export class McpServer {
 	private wss!: WebSocketServer;
@@ -18,12 +29,33 @@ export class McpServer {
 	private port: number = 0;
 
 	constructor(config: McpServerConfig) {
+		if (!config.authToken) {
+			throw new Error(
+				"McpServer requires a non-empty authToken — refusing to start without auth"
+			);
+		}
 		this.config = config;
 	}
 
 	async start(): Promise<number> {
 		// 0 = choose a random free port
-		this.wss = new WebSocketServer({ port: 0 });
+		this.wss = new WebSocketServer({
+			port: 0,
+			verifyClient: (info, cb) => {
+				const presented =
+					extractBearerToken(info.req.headers[CLAUDE_AUTH_HEADER]) ??
+					extractBearerToken(info.req.headers["authorization"]);
+
+				if (isAuthorized(this.config.authToken, presented)) {
+					cb(true);
+				} else {
+					console.warn(
+						"[MCP] WebSocket upgrade rejected: missing/invalid auth token"
+					);
+					cb(false, 401, "Unauthorized");
+				}
+			},
+		});
 
 		// address() is cast-safe once server is listening
 		this.port = (this.wss.address() as any).port as number;
@@ -56,7 +88,8 @@ export class McpServer {
 			console.error("WebSocket server error:", error);
 		});
 
-		// Write the discovery lock-file Claude looks for
+		// Write the discovery lock-file Claude looks for. Token is included
+		// so the CLI can read it and present it on the upgrade request.
 		await this.createLockFile(this.port);
 
 		// Set environment variables that Claude Code CLI expects
@@ -98,13 +131,13 @@ export class McpServer {
 		fs.mkdirSync(ideDir, { recursive: true });
 
 		this.lockFilePath = path.join(ideDir, `${port}.lock`);
-		
-		// We'll get the base path from the caller
+
 		const lockFileContent = {
 			pid: process.pid,
 			workspaceFolders: [], // Will be populated by caller
 			ideName: "Obsidian",
 			transport: "ws",
+			authToken: this.config.authToken,
 		};
 		fs.writeFileSync(this.lockFilePath, JSON.stringify(lockFileContent));
 	}
@@ -113,6 +146,8 @@ export class McpServer {
 		if (this.lockFilePath && fs.existsSync(this.lockFilePath)) {
 			const lockContent = JSON.parse(fs.readFileSync(this.lockFilePath, 'utf8'));
 			lockContent.workspaceFolders = [basePath];
+			// Preserve the authToken across rewrites
+			lockContent.authToken = this.config.authToken;
 			fs.writeFileSync(this.lockFilePath, JSON.stringify(lockContent));
 		}
 	}

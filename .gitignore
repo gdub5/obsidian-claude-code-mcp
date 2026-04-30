@@ -39,7 +39,15 @@ plan.md
 # Build artifacts
 *.tsbuildinfo
 
+# Vitest coverage output
+coverage/
+
 # IDE files
 *.log
 
 .env
+
+# Claude Code local permission state — contains tool-call history that
+# may include secrets (auth tokens passed via env vars in Bash commands).
+# Never commit this; it's per-developer state.
+.claude/settings.local.json

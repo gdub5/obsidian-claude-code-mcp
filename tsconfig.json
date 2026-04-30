@@ -22,6 +22,8 @@
     "**/*.ts"
   ],
   "exclude": [
-    "tmp/**/*"
+    "tmp/**/*",
+    "tests/**/*",
+    "vitest.config.ts"
   ]
 }

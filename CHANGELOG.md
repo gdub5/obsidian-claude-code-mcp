@@ -1,0 +1,110 @@
+# Changelog
+
+## v1.1.9 — 2026-04-30
+
+First release of the gdub5 fork. Three coordinated PRs landed together:
+spec hygiene + cleanup, bearer-token auth, and a tool-handler test scaffold
+with bug fixes surfaced by it.
+
+### MCP spec hygiene (against 2024-11-05)
+
+- **Fixed: notifications no longer get error-replied.** JSON-RPC notifications
+  (no `id` field — `notifications/initialized`, `notifications/cancelled`, etc.)
+  were being sent `Method not found` responses. They are now silently accepted,
+  per JSON-RPC 2.0.
+- **Fixed: `roots` was advertised as a server capability.** It's a *client*
+  capability per spec. Removed from the `initialize` response.
+- **Fixed: empty `prompts` and `resources` capabilities advertised but not
+  implemented.** Removed from the `initialize` response. Will be re-added
+  when the features land.
+- **Fixed: `serverInfo.version` hardcoded to `"1.0.0"`.** Now sourced from the
+  plugin manifest at runtime.
+- **Fixed: unknown tool returned a fake-success result with the error in the
+  text field.** Now returns a proper `-32602` JSON-RPC error.
+- **Fixed: `ping` returned the string `"pong"`.** Spec says return an empty
+  result object — corrected.
+- **Fixed: path-validation errors used `-32603` (internal error).** They are
+  parameter validation failures and now return `-32602` (invalid params)
+  consistently across `view`, `create`, `str_replace`, `insert`.
+
+### Bearer-token authentication (BREAKING)
+
+Both transports now require a per-vault bearer token. The token is
+auto-generated on first plugin load and persisted to plugin settings.
+The HTTP server refuses to start without one.
+
+- **WebSocket (Claude Code IDE):** token is written into the discovery lock
+  file's `authToken` field. Claude Code reads it and sends it on the upgrade
+  request as `x-claude-code-ide-authorization`. The WS server validates via
+  `ws.WebSocketServer.verifyClient` — bad token → 401 Unauthorized at upgrade.
+- **HTTP/SSE (Claude Desktop / mcp-remote):** server validates
+  `Authorization: Bearer <token>` on both `/messages` POST and `/sse` GET.
+  EventSource clients that can't set headers may pass `?token=<token>` on the
+  SSE GET as a fallback. Bad/missing token → 401.
+- **Origin check:** `validateOrigin` now actually validates. Loopback origins
+  (`localhost`, `127.0.0.1`, `[::1]`) and missing-origin (native clients) are
+  allowed; everything else returns 403.
+- **CORS:** `Access-Control-Allow-Origin` no longer reflects `*`. Pinned to
+  `http://localhost`.
+- **Settings UI:** new Authentication section with the token in plain text
+  (no security gain from masking when it's also in the config snippet),
+  Copy and Regenerate buttons (regenerate confirms before disconnecting
+  active clients), and a ready-to-paste config snippet for Claude Desktop /
+  mcp-remote with the live port and token already filled in.
+
+**Migration:** existing users will be upgraded automatically on plugin reload.
+A token is minted on first load post-upgrade. Existing Claude Desktop /
+mcp-remote configs must be updated to include the `--header` flag — see the
+snippet shown in the Authentication settings section.
+
+### Tool-handler test scaffold + bug fixes
+
+- **Added Vitest unit-test suite** covering utils, tool registry, MCP
+  handlers, auth helpers, settings, HTTP server, and WebSocket server.
+- **Added `tests/tools/general-tools.test.ts`** with 30 tests covering all
+  seven tools — first unit-test coverage of tool implementations.
+- **Added `tests/integration/stress.mjs`** — end-to-end harness that drives
+  the live plugin over HTTP/SSE. Exercises the auth gate, framing,
+  notifications, parallel reads, the full create/view/str_replace/insert
+  flow, edge-case paths (spaces, unicode, nested), and negative tests
+  (path traversal, unknown tools).
+- **Fixed: `create` did not auto-create parent folders.** Calls
+  `vault.createFolder(parent)` then `vault.create()` (was `adapter.write()`
+  which surfaced ENOENT race conditions when mixed with vault-layer folder
+  creation — staying in the `vault.*` API avoids the class).
+- **Fixed: `view` of a directory did not surface subfolder names.** Listing
+  `notes/` previously showed only direct files; now also lists subfolder
+  entries with a trailing `/`.
+- **Removed the legacy direct-method handlers** (`readFile`, `writeFile`,
+  `getOpenFiles`, `listFiles`, `getCurrentFile`, `getWorkspaceInfo`). All
+  tools are now reached via standard MCP `tools/call`.
+- **Removed dead modules:** `src/tools/file-tools.ts`,
+  `src/tools/workspace-tools.ts`, `src/tools/mcp-only-tools.ts`, plus the
+  stale manual test scripts at the repo root.
+
+### Test vault + dev workflow
+
+- **Test vault fixtures** at `test-fixtures/vault/` — committed canonical
+  content with a deliberate link topology, controlled tag distribution, and
+  edge-case files (spaces in name, unicode, empty file, deeply nested).
+- **`scripts/setup-test-vault.sh`** — idempotent script that wipes a target
+  Obsidian vault and reseeds it from fixtures. Refuses to wipe directories
+  it doesn't recognize as a test vault.
+- **`bun run test`, `bun run test:watch`, `bun run test:coverage`,
+  `bun run test:integration`, `bun run test-vault:setup`** — npm scripts for
+  the new test surface.
+
+### Build / packaging
+
+- **Build timestamp injected** by esbuild via `define.__BUILD_STAMP__`.
+- **Settings shows version + build stamp** at the top of the Authentication
+  section (`v1.1.9 · built 2026-04-30T...`). Designed to make "wrong bundle
+  loaded" failures visible at a glance — saved real debugging time.
+- **`install.sh`** now accepts a target path argument or `--vault VAULT_PATH`
+  flag, falls back to `OBSIDIAN_PLUGIN_PATH` env var, then to a hardcoded
+  default. Reads plugin id from `manifest.json` so a future rename stays in
+  sync. Warns if the target path doesn't look like an Obsidian plugin
+  directory.
+- **Manifest:** author updated to `gdub5`, authorUrl to the fork's GitHub.
+  Plugin id (`claude-code-mcp`) and display name (`Claude Code MCP`)
+  unchanged.

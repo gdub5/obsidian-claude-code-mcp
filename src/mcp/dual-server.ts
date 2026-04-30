@@ -16,6 +16,12 @@ export interface DualServerConfig {
 	httpPort?: number;
 	enableWebSocket?: boolean;
 	enableHttp?: boolean;
+	serverVersion?: string;
+	/**
+	 * Bearer token used to authenticate clients on both WebSocket and
+	 * HTTP/SSE transports. Required — both servers refuse to start without it.
+	 */
+	authToken: string;
 }
 
 export class McpDualServer {
@@ -27,8 +33,11 @@ export class McpDualServer {
 	private httpToolRegistry: ToolRegistry; // For HTTP/MCP tools
 
 	constructor(config: DualServerConfig) {
+		if (!config.authToken) {
+			throw new Error("McpDualServer requires a non-empty authToken");
+		}
 		this.config = config;
-		
+
 		// Initialize separate tool registries
 		this.wsToolRegistry = new ToolRegistry();
 		this.httpToolRegistry = new ToolRegistry();
@@ -39,7 +48,8 @@ export class McpDualServer {
 			config.app,
 			this.wsToolRegistry,
 			this.httpToolRegistry,
-			config.workspaceManager
+			config.workspaceManager,
+			config.serverVersion
 		);
 	}
 
@@ -108,6 +118,7 @@ export class McpDualServer {
 					onDisconnection: (ws: WebSocket) => {
 						console.debug("[MCP Dual] WebSocket client disconnected");
 					},
+					authToken: this.config.authToken,
 				};
 
 				this.wsServer = new McpServer(wsConfig);
@@ -137,6 +148,7 @@ export class McpDualServer {
 					onDisconnection: () => {
 						console.debug(`[MCP Dual] HTTP client disconnected`);
 					},
+					authToken: this.config.authToken,
 				};
 
 				this.httpServer = new McpHttpServer(httpConfig);

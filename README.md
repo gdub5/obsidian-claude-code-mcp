@@ -8,6 +8,7 @@ This plugin allows Claude Code and other MCP clients (like Claude Desktop) to in
 
 -   **Dual Transport MCP Server**: Supports both WebSocket (for Claude Code) and HTTP/SSE (for Claude Desktop)
 -   **Auto-Discovery**: Claude Code automatically finds and connects to your vault
+-   **Bearer-Token Auth**: Both transports require a per-vault token (auto-generated, rotatable in settings); HTTP server is loopback-only and origin-checked
 -   **File Operations**: Read and write vault files through MCP protocol
 -   **Workspace Context**: Provides current active file and vault structure to Claude
 -   **Multiple Client Support**: Connect both Claude Code and Claude Desktop simultaneously
@@ -28,26 +29,33 @@ Claude Desktop requires a special configuration to connect to the Obsidian MCP s
 3.  **Locate your Claude Desktop config file**:
     -   **macOS**: `$HOME/Library/Application Support/Claude/claude_desktop_config.json`
     -   **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
-4.  **Add the Obsidian MCP server** to your config using the `mcp-remote` command. `npx` will automatically download and run it for you.
+4.  **Copy the bearer token** from the plugin's Authentication section in settings — the plugin shows a ready-to-paste config snippet with the token already filled in.
+
+5.  **Add the Obsidian MCP server** to your config. The `--header` flag passes the bearer token to `mcp-remote`, which forwards it on every request.
 
     ```json
     {
     	"mcpServers": {
     		"obsidian": {
     			"command": "npx",
-    			"args": ["mcp-remote", "http://localhost:22360/sse"],
-    			"env": {}
+    			"args": [
+    				"-y",
+    				"mcp-remote",
+    				"http://localhost:22360/sse",
+    				"--header",
+    				"Authorization: Bearer <token-from-plugin-settings>"
+    			]
     		}
     	}
     }
     ```
 
-5.  **Restart Claude Desktop** after making the configuration change.
-6.  **Test the connection** by asking Claude about your vault: "What files are in my Obsidian vault?"
+6.  **Restart Claude Desktop** after making the configuration change.
+7.  **Test the connection** by asking Claude about your vault: "What files are in my Obsidian vault?"
 
 ### Other MCP Clients (with direct HTTP support)
 
-If you are using an MCP client that directly supports the legacy "HTTP with SSE" transport, you can use a simpler configuration without the `mcp-remote` bridge.
+If you are using an MCP client that directly supports the legacy "HTTP with SSE" transport, you can connect without the `mcp-remote` bridge — but you still need to send the bearer token.
 
 **Example Configuration:**
 
@@ -56,11 +64,15 @@ If you are using an MCP client that directly supports the legacy "HTTP with SSE"
 	"mcpServers": {
 		"obsidian": {
 			"url": "http://localhost:22360/sse",
-			"env": {}
+			"headers": {
+				"Authorization": "Bearer <token-from-plugin-settings>"
+			}
 		}
 	}
 }
 ```
+
+If your client only speaks raw EventSource (no custom headers), the SSE GET endpoint also accepts `?token=<token>` as a query parameter.
 
 ### Claude Code CLI
 
@@ -82,18 +94,7 @@ Claude Code automatically discovers and connects to Obsidian vaults through WebS
 
 1.  Go to **Obsidian Settings** → **Community Plugins** → **Claude Code** → **Settings**
 2.  Change the **"HTTP Server Port"** in the MCP Server Configuration section
-3.  **Update your Claude Desktop config** to use the new port:
-    ```json
-    {
-    	"mcpServers": {
-    		"obsidian": {
-    			"url": "http://localhost:22360/mcp",
-    			"env": {}
-    		}
-    	}
-    }
-    ```
-        NOTE: You can change the port in the settings.
+3.  Copy the updated configuration snippet from the **Authentication** section (the snippet always reflects the current port and token)
 4.  **Restart Claude Desktop** to apply the changes
 
 **Multiple Vaults**: If you run multiple Obsidian vaults with this plugin, each vault needs a unique port. The plugin will automatically detect port conflicts and guide you to configure different ports.
