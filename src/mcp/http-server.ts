@@ -625,11 +625,39 @@ export class McpHttpServer {
 			}
 			sessionId = sessionHeader;
 
+			// Pull the existing session record so we can validate against
+			// what was actually negotiated, not just what the server
+			// supports in the abstract.
+			const existing = this.sessions.get(sessionHeader)!;
+
+			// Hard lifecycle gate: a session is only usable AFTER a
+			// successful `initialize` has been observed (which is when
+			// protocolVersion gets stamped on the session). Without this
+			// check, a client could mint a session via a failed
+			// initialize call and then keep dispatching tools/* under a
+			// session that never completed handshake.
+			if (!existing.protocolVersion) {
+				res.writeHead(400, { "Content-Type": "application/json" });
+				res.end(
+					JSON.stringify({
+						jsonrpc: "2.0",
+						error: {
+							code: -32600,
+							message:
+								"Session has not completed initialization. Send a successful `initialize` request first.",
+						},
+						id: null,
+					})
+				);
+				return;
+			}
+
 			// Spec requires every post-initialize request to carry
-			// `MCP-Protocol-Version`. We enforce it strictly: missing or
-			// unsupported → 400. This catches version-skew bugs where a
-			// client successfully initialized but then fails to advertise
-			// the version on subsequent calls.
+			// `MCP-Protocol-Version`. Missing → 400. Mismatch with the
+			// version negotiated for THIS session → 400. (Checking
+			// against the per-session negotiated value is stricter than
+			// checking against the server-wide supported set — it would
+			// catch a future client trying to switch versions mid-session.)
 			const versionHeader = req.headers["mcp-protocol-version"];
 			const presentedVersion = Array.isArray(versionHeader)
 				? versionHeader[0]
@@ -649,16 +677,14 @@ export class McpHttpServer {
 				);
 				return;
 			}
-			if (!SUPPORTED_MCP_PROTOCOL_VERSIONS.has(presentedVersion)) {
+			if (presentedVersion !== existing.protocolVersion) {
 				res.writeHead(400, { "Content-Type": "application/json" });
 				res.end(
 					JSON.stringify({
 						jsonrpc: "2.0",
 						error: {
 							code: -32600,
-							message: `Unsupported MCP-Protocol-Version: ${presentedVersion}. Server supports: ${[
-								...SUPPORTED_MCP_PROTOCOL_VERSIONS,
-							].join(", ")}`,
+							message: `MCP-Protocol-Version mismatch: header=${presentedVersion}, session negotiated=${existing.protocolVersion}`,
 						},
 						id: null,
 					})
@@ -686,10 +712,19 @@ export class McpHttpServer {
 				);
 				responses.push(response);
 
-				// Capture the negotiated protocol version off the
-				// initialize response so we can validate the header
-				// the client must send on every subsequent request.
-				if (msg.method === "initialize" && response.result?.protocolVersion) {
+				// Capture the negotiated protocol version off a *successful*
+				// initialize response so subsequent requests can validate
+				// against it. Only versions we actually support are
+				// recorded — a handler that returns an unknown version
+				// shouldn't unlock the session. A failed/error initialize
+				// leaves protocolVersion null, which the post-init
+				// validation rejects.
+				if (
+					msg.method === "initialize" &&
+					!response.error &&
+					response.result?.protocolVersion &&
+					SUPPORTED_MCP_PROTOCOL_VERSIONS.has(response.result.protocolVersion)
+				) {
 					sess.protocolVersion = response.result.protocolVersion;
 				}
 			} else if (isNotification) {

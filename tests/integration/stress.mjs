@@ -497,8 +497,23 @@ async function main() {
 			Authorization: `Bearer ${TOKEN}`,
 			Accept: "application/json",
 		};
+		// Auto-inject MCP-Protocol-Version on post-init requests (anything
+		// carrying a session id and not calling `initialize`). The server
+		// rejects post-init calls without it; tests of header validation
+		// should pass extra={MCP-Protocol-Version: ""} to opt out.
 		const postMcp = (body, extra = {}) =>
 			new Promise((resolve, reject) => {
+				const isInit = Array.isArray(body)
+					? body.some((m) => m?.method === "initialize")
+					: body?.method === "initialize";
+				const finalExtra = { ...extra };
+				if (
+					!isInit &&
+					finalExtra["Mcp-Session-Id"] &&
+					finalExtra["MCP-Protocol-Version"] === undefined
+				) {
+					finalExtra["MCP-Protocol-Version"] = "2024-11-05";
+				}
 				const data = JSON.stringify(body);
 				const r = http.request(
 					{
@@ -506,7 +521,7 @@ async function main() {
 						port: PORT,
 						path: "/mcp",
 						method: "POST",
-						headers: { ...headers, ...extra, "Content-Length": Buffer.byteLength(data) },
+						headers: { ...headers, ...finalExtra, "Content-Length": Buffer.byteLength(data) },
 					},
 					(res) => {
 						const chunks = [];
@@ -648,7 +663,11 @@ async function main() {
 		log(`✓ stress test complete with ${warnings} warning(s) above`);
 	}
 	sseReq?.destroy();
-	process.exit(warnings === 0 ? 0 : 0); // warnings are informational, not failures
+	// Exit non-zero on any warning. Past versions intentionally exited 0
+	// because some warnings tracked known-bug behavior we hadn't fixed
+	// yet — those bugs are now fixed, so any warning here is a real
+	// regression and should fail CI / show up in shell exit codes.
+	process.exit(warnings === 0 ? 0 : 1);
 }
 
 main().catch((err) => {

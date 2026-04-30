@@ -53,8 +53,20 @@ this is purely additive.
   review.
 - **Strict MCP-Protocol-Version validation.** Per spec, every post-
   initialize `/mcp` request MUST carry the negotiated version. We now
-  reject missing-or-unsupported headers with `400` before dispatching,
-  also flagged by the adversarial review.
+  reject with `400` before dispatching when the header is missing or
+  doesn't match the version negotiated *for this specific session*
+  (not just the server-wide supported set). Flagged by the adversarial
+  review.
+- **Session lifecycle gate.** A session minted by an `initialize` that
+  errored (or returned an unsupported version) is unusable for tool
+  calls — `protocolVersion` only gets stamped on the session for
+  *successful* initialize responses. Without this, a client could mint
+  a session via a failed handshake and continue using it. Caught by
+  the third adversarial pass.
+- **Integration harness fixed and tightened.** Auto-injects
+  `MCP-Protocol-Version` on post-init `/mcp` calls; exits non-zero on
+  any warning so a regression in the live test vault produces a real
+  failure exit code rather than a green CI run with hidden errors.
 - **Honest connection accounting.** `clientCount` now sums SSE streams
   and active `/mcp` sessions; previously the latter were invisible.
 - **Origin check + bearer-token auth** apply unchanged. A request to
@@ -71,12 +83,14 @@ this is purely additive.
   block that opens a parallel session over the modern transport and
   cross-checks tool count and dispatch behavior against the legacy
   `/sse` path.
-- **6 additional tests** for the second-pass fixes: protocol-version
-  validation (missing / unsupported / accepted / not-required-on-init)
-  and idle expiry (expires after 30 min, does NOT expire inside the
-  window). Time-based tests use `vi.setSystemTime` so they're
-  deterministic.
-- Total tests now **153** (was 130 in v1.1.10).
+- **8 additional tests** across two adversarial-review fix passes:
+  protocol-version validation (missing / unsupported / accepted /
+  not-required-on-init / per-session-mismatch), idle expiry (expires
+  after 30 min, does NOT expire inside the window), and the session
+  lifecycle gate (post-init requests rejected on a session whose
+  initialize errored). Time-based tests use `vi.setSystemTime` so
+  they're deterministic.
+- Total tests now **155** (was 130 in v1.1.10).
 
 ## v1.1.10 — 2026-04-30 (PR B: MetadataCache integration)
 

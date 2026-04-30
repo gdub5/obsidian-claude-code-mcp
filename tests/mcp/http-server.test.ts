@@ -554,7 +554,10 @@ describe("McpHttpServer Streamable HTTP (/mcp)", () => {
 			);
 			expect(res.status).toBe(400);
 			const err = JSON.parse(res.body);
-			expect(err.error?.message).toMatch(/Unsupported/i);
+			// The check is now per-session (mismatch with what THIS session
+			// negotiated), not server-wide ("unsupported"). Either message
+			// counts as a correct rejection.
+			expect(err.error?.message).toMatch(/mismatch|Unsupported|negotiated/i);
 		});
 
 		it("accepts requests with the negotiated version", async () => {
@@ -577,6 +580,97 @@ describe("McpHttpServer Streamable HTTP (/mcp)", () => {
 				params: {},
 			});
 			expect(res.status).toBe(200);
+		});
+
+		it("rejects requests when the version header doesn't match what THIS session negotiated", async () => {
+			const sid = await freshSession();
+			// Even though "9999-99-99" is well-formed, the session
+			// negotiated 2024-11-05 — the per-session check must fire.
+			const res = await postMcp(
+				{ jsonrpc: "2.0", id: 1, method: "tools/list" },
+				{ "Mcp-Session-Id": sid, "MCP-Protocol-Version": "9999-99-99" }
+			);
+			expect(res.status).toBe(400);
+			const err = JSON.parse(res.body);
+			expect(err.error?.message).toMatch(/mismatch|negotiated|Unsupported/i);
+		});
+	});
+
+	describe("session lifecycle gate (failed initialize)", () => {
+		// A session minted by a failed/errored initialize must NOT be
+		// usable for tools/* — the handshake never completed.
+		let errServer: McpHttpServer;
+		let errPort: number;
+
+		beforeEach(async () => {
+			errServer = new McpHttpServer({
+				onMessage: (req, reply) => {
+					if (req.method === "initialize") {
+						reply({
+							error: {
+								code: -32603,
+								message: "init failed for test",
+							},
+						});
+					} else {
+						reply({ result: { ok: true } });
+					}
+				},
+				authToken: TOKEN,
+			});
+			errPort = await errServer.start(0);
+		});
+
+		afterEach(() => {
+			errServer.stop();
+		});
+
+		function postErr(
+			body: any,
+			extraHeaders: Record<string, string> = {}
+		): Promise<FetchResult> {
+			return fetchOnce(
+				"POST",
+				"/mcp",
+				errPort,
+				{
+					"Content-Type": "application/json",
+					Authorization: `Bearer ${TOKEN}`,
+					Accept: "application/json",
+					...extraHeaders,
+				},
+				JSON.stringify(body)
+			);
+		}
+
+		it("rejects post-init requests on a session whose initialize errored", async () => {
+			const init = await postErr({
+				jsonrpc: "2.0",
+				id: 1,
+				method: "initialize",
+				params: {},
+			});
+			// The session is still minted (id in response header) — that's
+			// spec-compliant — but protocolVersion never gets stamped
+			// because the initialize response carried an error.
+			const sid = init.headers["mcp-session-id"] as string;
+			expect(sid).toBeTruthy();
+			const initBody = JSON.parse(init.body);
+			expect(initBody.error).toBeDefined();
+
+			// Try to use the session as if everything were fine. Even with
+			// a perfectly valid version header, it must fail because the
+			// handshake never completed.
+			const res = await postErr(
+				{ jsonrpc: "2.0", id: 2, method: "tools/list" },
+				{
+					"Mcp-Session-Id": sid,
+					"MCP-Protocol-Version": "2024-11-05",
+				}
+			);
+			expect(res.status).toBe(400);
+			const err = JSON.parse(res.body);
+			expect(err.error?.message).toMatch(/initialization|initialize/i);
 		});
 	});
 
