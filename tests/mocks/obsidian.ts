@@ -168,13 +168,71 @@ export class Workspace {
 	}
 }
 
+/**
+ * Mock of Obsidian's MetadataCache. Real Obsidian builds these structures
+ * by parsing every note's content; the mock is seeded explicitly via
+ * `__setFileCache(path, cache)` so tests can pin exact link/tag topologies.
+ *
+ * `resolvedLinks` and `unresolvedLinks` mirror the real shape:
+ *   { sourcePath: { targetPath: count } }
+ * Tests can either set them directly via `__seedLinks` or compute them by
+ * adding file caches with `links: [{ link: "target" }]` entries.
+ */
 export class MetadataCache {
-	getFileCache(_file: TFile): any {
-		return null;
+	resolvedLinks: Record<string, Record<string, number>> = {};
+	unresolvedLinks: Record<string, Record<string, number>> = {};
+	private fileCaches = new Map<string, CachedMetadata>();
+
+	getFileCache(file: TFile | null): CachedMetadata | null {
+		if (!file) return null;
+		return this.fileCaches.get(file.path) ?? null;
 	}
+
 	getFirstLinkpathDest(_link: string, _src: string): TFile | null {
 		return null;
 	}
+
+	// ── test helpers ────────────────────────────────────────────────────
+
+	__setFileCache(path: string, cache: CachedMetadata): void {
+		this.fileCaches.set(path, cache);
+	}
+
+	/**
+	 * Seed link topology declaratively. Call as:
+	 *   metadataCache.__seedLinks({
+	 *     "hub.md":   ["leaf-a.md", "leaf-b.md"],
+	 *     "leaf-b.md": ["hub.md"],
+	 *   });
+	 * Populates resolvedLinks for both directions of lookup.
+	 */
+	__seedLinks(map: Record<string, string[]>): void {
+		for (const [source, targets] of Object.entries(map)) {
+			this.resolvedLinks[source] ??= {};
+			for (const target of targets) {
+				this.resolvedLinks[source][target] =
+					(this.resolvedLinks[source][target] ?? 0) + 1;
+			}
+		}
+	}
+
+	__reset(): void {
+		this.resolvedLinks = {};
+		this.unresolvedLinks = {};
+		this.fileCaches.clear();
+	}
+}
+
+/**
+ * Mirrors the shape of Obsidian's CachedMetadata. Tests only need to set
+ * the fields they're exercising; everything else stays undefined.
+ */
+export interface CachedMetadata {
+	frontmatter?: Record<string, any>;
+	tags?: Array<{ tag: string; position?: any }>;
+	links?: Array<{ link: string; original?: string; position?: any }>;
+	embeds?: Array<{ link: string; original?: string }>;
+	headings?: Array<{ heading: string; level: number }>;
 }
 
 export class App {
@@ -244,4 +302,33 @@ export function addIcon(_id: string, _svg: string): void {}
 
 export function normalizePath(p: string): string {
 	return p;
+}
+
+/**
+ * Mirrors Obsidian's `getAllTags(cache)` helper. Returns the merged set of
+ * inline and frontmatter tags, each prefixed with `#`. Returns null for a
+ * null cache, an empty array if a cache exists but contributes no tags.
+ *
+ * Frontmatter tag conventions handled:
+ *   tags: [a, b]      → ["#a", "#b"]
+ *   tags: "a, b"      → ["#a", "#b"]
+ *   tag: "a"          → ["#a"]
+ */
+export function getAllTags(cache: CachedMetadata | null): string[] | null {
+	if (!cache) return null;
+	const out = new Set<string>();
+	for (const t of cache.tags ?? []) out.add(t.tag);
+	const fmRaw = cache.frontmatter?.tags ?? cache.frontmatter?.tag;
+	if (Array.isArray(fmRaw)) {
+		for (const t of fmRaw) {
+			if (typeof t === "string" && t.trim()) {
+				out.add(`#${t.trim().replace(/^#/, "")}`);
+			}
+		}
+	} else if (typeof fmRaw === "string") {
+		for (const part of fmRaw.split(/[,\s]+/)) {
+			if (part) out.add(`#${part.replace(/^#/, "")}`);
+		}
+	}
+	return Array.from(out);
 }

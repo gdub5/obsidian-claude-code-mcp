@@ -1,5 +1,54 @@
 # Changelog
 
+## v1.1.10 — 2026-04-30 (PR B: MetadataCache integration)
+
+Six new tools backed by Obsidian's MetadataCache. Shifts the plugin from a
+pure file-CRUD layer to a knowledge-graph-aware one — Claude can now reason
+about links, tags, and frontmatter without manually re-parsing notes.
+
+### New tools
+
+- **`get_frontmatter(path)`** — returns parsed YAML frontmatter as JSON, or
+  null. No need to re-parse from raw note text.
+- **`get_backlinks(path)`** — every note that wikilinks to the target.
+  Reads from `app.metadataCache.resolvedLinks`, so only resolved links count.
+- **`get_outgoing_links(path)`** — every note the source links to, split
+  into resolved and unresolved.
+- **`list_tags()`** — every tag in the vault with a per-note count
+  (deduped within each note). Merges inline `#tags` and frontmatter
+  `tags:` arrays via `getAllTags()`.
+- **`find_by_tag(tag, nested?)`** — files carrying a given tag. Defaults to
+  nested matching: `#project` matches `#project/april` etc. Pass
+  `nested: false` for exact-match-only.
+- **`search_vault(query, max_results?, case_sensitive?)`** — naive full-text
+  scan with `path:line: snippet` output. Case-insensitive by default,
+  capped at 50 results unless overridden.
+
+Total tool count is now **13** (was 7). All metadata tools are registered
+to both transports (WS + HTTP).
+
+### Tests
+
+- **`tests/tools/metadata-tools.test.ts`** — 28 unit tests covering all
+  six tools, including edge cases (empty vault, dedup-per-file in
+  list_tags, nested vs exact matching in find_by_tag, case sensitivity
+  and max_results capping in search_vault, snippet trimming for long lines).
+- Obsidian mock extended with realistic MetadataCache: `getFileCache`,
+  `resolvedLinks`/`unresolvedLinks`, plus `__seedLinks` and
+  `__setFileCache` test helpers. `getAllTags()` exported as a top-level
+  function matching real Obsidian.
+- **Integration stress harness extended** with 8 assertions against the
+  fixture vault's pinned link topology and tag distribution. The fixtures
+  in `test-fixtures/vault/` were designed for exactly this — every
+  expected backlink, outgoing link, and tag membership is documented in
+  `test-fixtures/README.md` and pinned in the harness.
+
+### Internal
+
+- `dual-server.ts` registration loop refactored: `registerToBothRegistries()`
+  pairs definitions to implementations by name (not position) so future
+  tool families can drop in without copy-pasting the loop.
+
 ## v1.1.9 — 2026-04-30
 
 First release of the gdub5 fork. Three coordinated PRs landed together:

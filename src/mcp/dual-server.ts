@@ -7,6 +7,7 @@ import { McpRequest, McpNotification } from "./types";
 import { WorkspaceManager } from "../obsidian/workspace-manager";
 import { ToolRegistry } from "../shared/tool-registry";
 import { GeneralTools, GENERAL_TOOL_DEFINITIONS } from "../tools/general-tools";
+import { MetadataTools, METADATA_TOOL_DEFINITIONS } from "../tools/metadata-tools";
 import { IdeTools, IDE_TOOL_DEFINITIONS } from "../ide/ide-tools";
 
 export interface DualServerConfig {
@@ -55,23 +56,18 @@ export class McpDualServer {
 
 	private registerTools(): void {
 		// Register general tools to BOTH registries (available for both IDE and MCP)
-		const generalTools = new GeneralTools(this.config.app);
-		const generalImplementations = generalTools.createImplementations();
+		this.registerToBothRegistries(
+			new GeneralTools(this.config.app).createImplementations(),
+			GENERAL_TOOL_DEFINITIONS
+		);
 
-		for (let i = 0; i < GENERAL_TOOL_DEFINITIONS.length; i++) {
-			const definition = GENERAL_TOOL_DEFINITIONS[i];
-			const implementation = generalImplementations[i];
-			
-			if (!implementation || definition.name !== implementation.name) {
-				throw new Error(
-					`Tool definition and implementation mismatch for ${definition.name}`
-				);
-			}
-			
-			// Register to both WebSocket and HTTP registries
-			this.wsToolRegistry.register(definition, implementation);
-			this.httpToolRegistry.register(definition, implementation);
-		}
+		// Register MetadataCache-backed tools to BOTH registries — these are
+		// vault-semantic operations (frontmatter, backlinks, tags, search) that
+		// any MCP client benefits from, not just the IDE.
+		this.registerToBothRegistries(
+			new MetadataTools(this.config.app).createImplementations(),
+			METADATA_TOOL_DEFINITIONS
+		);
 
 		// Register IDE-specific tools ONLY to WebSocket registry
 		const ideTools = new IdeTools(this.config.app);
@@ -100,6 +96,28 @@ export class McpDualServer {
 			"[McpDualServer] HTTP/MCP tools:",
 			this.httpToolRegistry.getRegisteredToolNames()
 		);
+	}
+
+	/**
+	 * Pair definitions with implementations by name (not just position) and
+	 * register the result to both transport registries. Centralizes the
+	 * mismatch check that used to be duplicated for each tool family.
+	 */
+	private registerToBothRegistries(
+		implementations: import("../shared/tool-registry").ToolImplementation[],
+		definitions: import("../shared/tool-registry").ToolDefinition[]
+	): void {
+		const byName = new Map(implementations.map((i) => [i.name, i]));
+		for (const def of definitions) {
+			const impl = byName.get(def.name);
+			if (!impl) {
+				throw new Error(
+					`Tool definition has no matching implementation: ${def.name}`
+				);
+			}
+			this.wsToolRegistry.register(def, impl);
+			this.httpToolRegistry.register(def, impl);
+		}
 	}
 
 	async start(): Promise<{ wsPort?: number; httpPort?: number }> {

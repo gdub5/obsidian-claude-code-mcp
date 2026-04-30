@@ -1,0 +1,444 @@
+import { describe, it, expect, beforeEach } from "vitest";
+import { App, Vault, MetadataCache } from "../mocks/obsidian";
+import {
+	MetadataTools,
+	METADATA_TOOL_DEFINITIONS,
+} from "../../src/tools/metadata-tools";
+import type { McpResponse } from "../../src/mcp/types";
+import type { ToolImplementation } from "../../src/shared/tool-registry";
+
+// ──────────────────────────────────────────────────────────────────────
+// Test harness — same shape as general-tools.test.ts so the patterns
+// stay aligned across tool families.
+
+function makeReply(): {
+	reply: (m: any) => void;
+	calls: Array<Omit<McpResponse, "jsonrpc" | "id">>;
+} {
+	const calls: Array<Omit<McpResponse, "jsonrpc" | "id">> = [];
+	return {
+		reply: (m) => calls.push(m),
+		calls,
+	};
+}
+
+function setup(): {
+	app: App;
+	vault: Vault;
+	metadataCache: MetadataCache;
+	handlers: Map<string, ToolImplementation>;
+} {
+	const vault = new Vault();
+	const app = new App(vault);
+	const tools = new MetadataTools(app as any);
+	const handlers = new Map(
+		tools.createImplementations().map((i) => [i.name, i])
+	);
+	return { app, vault, metadataCache: app.metadataCache, handlers };
+}
+
+const textOf = (call: any) => call.result?.content?.[0]?.text ?? "";
+
+// ──────────────────────────────────────────────────────────────────────
+// Definitions sanity check
+
+describe("METADATA_TOOL_DEFINITIONS", () => {
+	it("each definition has a matching implementation", () => {
+		const { handlers } = setup();
+		const defNames = METADATA_TOOL_DEFINITIONS.map((d) => d.name);
+		const implNames = Array.from(handlers.keys());
+		expect(implNames.sort()).toEqual(defNames.sort());
+	});
+
+	it("declares the six expected tools", () => {
+		const names = METADATA_TOOL_DEFINITIONS.map((d) => d.name).sort();
+		expect(names).toEqual([
+			"find_by_tag",
+			"get_backlinks",
+			"get_frontmatter",
+			"get_outgoing_links",
+			"list_tags",
+			"search_vault",
+		]);
+	});
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// get_frontmatter
+
+describe("get_frontmatter", () => {
+	it("returns parsed frontmatter as JSON", async () => {
+		const { vault, metadataCache, handlers } = setup();
+		vault.__seed("note.md", "---\ntitle: x\n---\nbody");
+		metadataCache.__setFileCache("note.md", {
+			frontmatter: { title: "x", tags: ["a", "b"], date: "2026-01-01" },
+		});
+
+		const { reply, calls } = makeReply();
+		await handlers.get("get_frontmatter")!.handler({ path: "note.md" }, reply);
+
+		expect(calls[0].error).toBeUndefined();
+		const parsed = JSON.parse(textOf(calls[0]));
+		expect(parsed).toEqual({
+			title: "x",
+			tags: ["a", "b"],
+			date: "2026-01-01",
+		});
+	});
+
+	it("returns null when the note has no frontmatter", async () => {
+		const { vault, metadataCache, handlers } = setup();
+		vault.__seed("plain.md", "no fm here");
+		metadataCache.__setFileCache("plain.md", {}); // cache exists but no fm
+
+		const { reply, calls } = makeReply();
+		await handlers
+			.get("get_frontmatter")!
+			.handler({ path: "plain.md" }, reply);
+
+		expect(calls[0].error).toBeUndefined();
+		expect(JSON.parse(textOf(calls[0]))).toBeNull();
+	});
+
+	it("rejects missing file with -32603", async () => {
+		const { handlers } = setup();
+		const { reply, calls } = makeReply();
+		await handlers
+			.get("get_frontmatter")!
+			.handler({ path: "missing.md" }, reply);
+		expect(calls[0].error?.code).toBe(-32603);
+	});
+
+	it("rejects invalid path with -32602", async () => {
+		const { handlers } = setup();
+		const { reply, calls } = makeReply();
+		await handlers.get("get_frontmatter")!.handler({}, reply);
+		expect(calls[0].error?.code).toBe(-32602);
+	});
+
+	it("rejects path traversal with -32602", async () => {
+		const { handlers } = setup();
+		const { reply, calls } = makeReply();
+		await handlers
+			.get("get_frontmatter")!
+			.handler({ path: "../etc/passwd" }, reply);
+		expect(calls[0].error?.code).toBe(-32602);
+	});
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// get_backlinks
+
+describe("get_backlinks", () => {
+	it("lists every source that links to the target, sorted", async () => {
+		const { vault, metadataCache, handlers } = setup();
+		vault.__seed("hub.md", "x");
+		vault.__seed("leaf-a.md", "x");
+		vault.__seed("leaf-c.md", "x");
+		// Mirrors the fixture vault topology: hub→leaf-a, leaf-c→leaf-a
+		metadataCache.__seedLinks({
+			"hub.md": ["leaf-a.md", "leaf-b.md", "leaf-c.md"],
+			"leaf-c.md": ["leaf-a.md"],
+		});
+
+		const { reply, calls } = makeReply();
+		await handlers
+			.get("get_backlinks")!
+			.handler({ path: "leaf-a.md" }, reply);
+
+		const text = textOf(calls[0]);
+		expect(text).toContain("hub.md");
+		expect(text).toContain("leaf-c.md");
+		// Sorted alphabetically, hub comes before leaf-c
+		expect(text.indexOf("hub.md")).toBeLessThan(text.indexOf("leaf-c.md"));
+		// Should report a count
+		expect(text).toMatch(/2/);
+	});
+
+	it("reports zero backlinks cleanly", async () => {
+		const { vault, metadataCache, handlers } = setup();
+		vault.__seed("orphan.md", "x");
+		// no links seeded
+		const { reply, calls } = makeReply();
+		await handlers
+			.get("get_backlinks")!
+			.handler({ path: "orphan.md" }, reply);
+
+		expect(calls[0].error).toBeUndefined();
+		expect(textOf(calls[0]).toLowerCase()).toMatch(/no backlinks/);
+	});
+
+	it("does NOT include outgoing links from the target itself", async () => {
+		const { vault, metadataCache, handlers } = setup();
+		vault.__seed("a.md", "x");
+		vault.__seed("b.md", "x");
+		// a links to b — but b's backlinks should include a, not b.
+		metadataCache.__seedLinks({ "a.md": ["b.md"] });
+
+		const { reply, calls } = makeReply();
+		await handlers.get("get_backlinks")!.handler({ path: "b.md" }, reply);
+
+		const text = textOf(calls[0]);
+		expect(text).toContain("a.md");
+		expect(text.split("\n").filter((l: string) => l.includes("b.md")).length)
+			.toBeLessThanOrEqual(1); // only the header line mentions b.md
+	});
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// get_outgoing_links
+
+describe("get_outgoing_links", () => {
+	it("reports resolved targets sorted under a Resolved heading", async () => {
+		const { vault, metadataCache, handlers } = setup();
+		vault.__seed("hub.md", "x");
+		metadataCache.__seedLinks({
+			"hub.md": ["leaf-c.md", "leaf-a.md", "leaf-b.md"],
+		});
+
+		const { reply, calls } = makeReply();
+		await handlers
+			.get("get_outgoing_links")!
+			.handler({ path: "hub.md" }, reply);
+
+		const text = textOf(calls[0]);
+		expect(text).toContain("Resolved:");
+		expect(text).toContain("leaf-a.md");
+		expect(text).toContain("leaf-b.md");
+		expect(text).toContain("leaf-c.md");
+		// Sorted
+		expect(text.indexOf("leaf-a.md")).toBeLessThan(text.indexOf("leaf-b.md"));
+		expect(text.indexOf("leaf-b.md")).toBeLessThan(text.indexOf("leaf-c.md"));
+	});
+
+	it("separates resolved from unresolved", async () => {
+		const { vault, metadataCache, handlers } = setup();
+		vault.__seed("a.md", "x");
+		metadataCache.resolvedLinks = { "a.md": { "real.md": 1 } };
+		metadataCache.unresolvedLinks = { "a.md": { "missing.md": 1 } };
+
+		const { reply, calls } = makeReply();
+		await handlers
+			.get("get_outgoing_links")!
+			.handler({ path: "a.md" }, reply);
+
+		const text = textOf(calls[0]);
+		expect(text).toContain("Resolved:");
+		expect(text).toContain("real.md");
+		expect(text).toContain("Unresolved:");
+		expect(text).toContain("missing.md");
+	});
+
+	it("handles a file with no outgoing links", async () => {
+		const { vault, handlers } = setup();
+		vault.__seed("orphan.md", "x");
+		const { reply, calls } = makeReply();
+		await handlers
+			.get("get_outgoing_links")!
+			.handler({ path: "orphan.md" }, reply);
+
+		expect(calls[0].error).toBeUndefined();
+		expect(textOf(calls[0])).toMatch(/no links/i);
+	});
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// list_tags
+
+describe("list_tags", () => {
+	it("aggregates inline + frontmatter tags across the vault", async () => {
+		const { vault, metadataCache, handlers } = setup();
+		vault.__seed("a.md", "x");
+		vault.__seed("b.md", "x");
+		vault.__seed("c.md", "x");
+		metadataCache.__setFileCache("a.md", {
+			tags: [{ tag: "#alpha" }, { tag: "#beta" }],
+		});
+		metadataCache.__setFileCache("b.md", {
+			frontmatter: { tags: ["alpha", "gamma"] },
+		});
+		metadataCache.__setFileCache("c.md", {
+			tags: [{ tag: "#beta" }],
+		});
+
+		const { reply, calls } = makeReply();
+		await handlers.get("list_tags")!.handler({}, reply);
+
+		const text = textOf(calls[0]);
+		// #alpha appears in 2 files (a, b)
+		expect(text).toMatch(/#alpha \(2\)/);
+		// #beta appears in 2 files (a, c)
+		expect(text).toMatch(/#beta \(2\)/);
+		// #gamma appears in 1 file (b)
+		expect(text).toMatch(/#gamma \(1\)/);
+	});
+
+	it("dedupes when a tag appears multiple times in one file", async () => {
+		const { vault, metadataCache, handlers } = setup();
+		vault.__seed("a.md", "x");
+		metadataCache.__setFileCache("a.md", {
+			tags: [{ tag: "#dup" }, { tag: "#dup" }, { tag: "#dup" }],
+		});
+
+		const { reply, calls } = makeReply();
+		await handlers.get("list_tags")!.handler({}, reply);
+
+		expect(textOf(calls[0])).toMatch(/#dup \(1\)/);
+	});
+
+	it("handles an empty vault", async () => {
+		const { handlers } = setup();
+		const { reply, calls } = makeReply();
+		await handlers.get("list_tags")!.handler({}, reply);
+		expect(textOf(calls[0]).toLowerCase()).toMatch(/no tags/);
+	});
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// find_by_tag
+
+describe("find_by_tag", () => {
+	function withTaggedVault() {
+		const ctx = setup();
+		ctx.vault.__seed("a.md", "x");
+		ctx.vault.__seed("b.md", "x");
+		ctx.vault.__seed("c.md", "x");
+		ctx.metadataCache.__setFileCache("a.md", {
+			tags: [{ tag: "#project" }],
+		});
+		ctx.metadataCache.__setFileCache("b.md", {
+			tags: [{ tag: "#project/april" }],
+		});
+		ctx.metadataCache.__setFileCache("c.md", {
+			tags: [{ tag: "#unrelated" }],
+		});
+		return ctx;
+	}
+
+	it("matches the exact tag", async () => {
+		const { handlers } = withTaggedVault();
+		const { reply, calls } = makeReply();
+		await handlers
+			.get("find_by_tag")!
+			.handler({ tag: "project", nested: false }, reply);
+		const text = textOf(calls[0]);
+		expect(text).toContain("a.md");
+		expect(text).not.toContain("b.md"); // nested off → skip
+	});
+
+	it("includes nested tags when nested=true (default)", async () => {
+		const { handlers } = withTaggedVault();
+		const { reply, calls } = makeReply();
+		await handlers.get("find_by_tag")!.handler({ tag: "project" }, reply);
+		const text = textOf(calls[0]);
+		expect(text).toContain("a.md");
+		expect(text).toContain("b.md"); // #project/april matches
+		expect(text).not.toContain("c.md");
+	});
+
+	it("accepts tag with or without leading #", async () => {
+		const { handlers } = withTaggedVault();
+		const a = makeReply();
+		const b = makeReply();
+		await handlers.get("find_by_tag")!.handler({ tag: "#project" }, a.reply);
+		await handlers.get("find_by_tag")!.handler({ tag: "project" }, b.reply);
+		expect(textOf(a.calls[0])).toBe(textOf(b.calls[0]));
+	});
+
+	it("reports no matches cleanly", async () => {
+		const { handlers } = withTaggedVault();
+		const { reply, calls } = makeReply();
+		await handlers
+			.get("find_by_tag")!
+			.handler({ tag: "nonexistent" }, reply);
+		expect(textOf(calls[0]).toLowerCase()).toMatch(/no files/);
+	});
+
+	it("rejects missing tag parameter with -32602", async () => {
+		const { handlers } = setup();
+		const { reply, calls } = makeReply();
+		await handlers.get("find_by_tag")!.handler({}, reply);
+		expect(calls[0].error?.code).toBe(-32602);
+	});
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// search_vault
+
+describe("search_vault", () => {
+	it("finds matching lines and reports path:line:snippet", async () => {
+		const { vault, handlers } = setup();
+		vault.__seed("a.md", "alpha\nbeta\ngamma");
+		vault.__seed("b.md", "delta\nbeta is here too");
+
+		const { reply, calls } = makeReply();
+		await handlers.get("search_vault")!.handler({ query: "beta" }, reply);
+
+		const text = textOf(calls[0]);
+		expect(text).toMatch(/a\.md:2: beta/);
+		expect(text).toMatch(/b\.md:2: beta is here too/);
+	});
+
+	it("is case-insensitive by default", async () => {
+		const { vault, handlers } = setup();
+		vault.__seed("a.md", "Alpha BETA gamma");
+		const { reply, calls } = makeReply();
+		await handlers.get("search_vault")!.handler({ query: "beta" }, reply);
+		expect(textOf(calls[0])).toContain("a.md:1");
+	});
+
+	it("respects case_sensitive=true", async () => {
+		const { vault, handlers } = setup();
+		vault.__seed("a.md", "Alpha BETA gamma");
+		const { reply, calls } = makeReply();
+		await handlers
+			.get("search_vault")!
+			.handler({ query: "beta", case_sensitive: true }, reply);
+		expect(textOf(calls[0]).toLowerCase()).toMatch(/no matches/);
+	});
+
+	it("caps results at max_results", async () => {
+		const { vault, handlers } = setup();
+		// Seed 100 files all containing "needle"
+		for (let i = 0; i < 100; i++) {
+			vault.__seed(`f${i}.md`, "needle");
+		}
+		const { reply, calls } = makeReply();
+		await handlers
+			.get("search_vault")!
+			.handler({ query: "needle", max_results: 10 }, reply);
+
+		const text = textOf(calls[0]);
+		// 10 result lines + 1 header line = 11 lines max
+		expect(text.split("\n").length).toBeLessThanOrEqual(11);
+		expect(text).toMatch(/capped at 10/);
+	});
+
+	it("reports no matches cleanly", async () => {
+		const { vault, handlers } = setup();
+		vault.__seed("a.md", "nothing here");
+		const { reply, calls } = makeReply();
+		await handlers
+			.get("search_vault")!
+			.handler({ query: "missing" }, reply);
+		expect(textOf(calls[0]).toLowerCase()).toMatch(/no matches/);
+	});
+
+	it("rejects missing query with -32602", async () => {
+		const { handlers } = setup();
+		const { reply, calls } = makeReply();
+		await handlers.get("search_vault")!.handler({}, reply);
+		expect(calls[0].error?.code).toBe(-32602);
+	});
+
+	it("trims very long lines into a snippet", async () => {
+		const { vault, handlers } = setup();
+		const longLine = "a".repeat(500) + " match " + "b".repeat(500);
+		vault.__seed("a.md", longLine);
+		const { reply, calls } = makeReply();
+		await handlers.get("search_vault")!.handler({ query: "match" }, reply);
+		const text = textOf(calls[0]);
+		// Snippet capped + ellipsis appended
+		expect(text).toContain("…");
+	});
+});

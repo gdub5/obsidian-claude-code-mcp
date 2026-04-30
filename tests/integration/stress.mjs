@@ -369,6 +369,124 @@ async function main() {
 		}
 	}
 
+	log("\n─── metadata tools (PR B) ──────────────────────────────────");
+	// Expectations come from test-fixtures/README.md. If you change the
+	// fixture topology there, update both the file *and* these assertions.
+
+	// get_frontmatter — basics/with-frontmatter.md has known YAML
+	{
+		const r = await callTool("get_frontmatter", {
+			path: "basics/with-frontmatter.md",
+		});
+		try {
+			const fm = JSON.parse(textOf(r.result));
+			const ok =
+				fm?.title === "Note With Frontmatter" &&
+				Array.isArray(fm.tags) &&
+				fm.tags.includes("yaml-tag-one");
+			log(
+				`  get_frontmatter basics/with-frontmatter.md → ${ok ? "ok" : "MISMATCH"} (${fmt(r.elapsed)})`
+			);
+			if (!ok) warn(`frontmatter parse mismatch: ${JSON.stringify(fm)}`);
+		} catch (err) {
+			warn(`frontmatter parse error: ${err}`);
+		}
+	}
+
+	// get_backlinks — leaf-a is linked from hub AND leaf-c (per fixtures)
+	{
+		const r = await callTool("get_backlinks", { path: "links/leaf-a.md" });
+		const text = textOf(r.result);
+		const hasHub = text.includes("links/hub.md");
+		const hasLeafC = text.includes("links/leaf-c.md");
+		log(
+			`  get_backlinks links/leaf-a.md → hub=${hasHub} leaf-c=${hasLeafC} (${fmt(r.elapsed)})`
+		);
+		if (!hasHub || !hasLeafC) {
+			warn(
+				"backlinks for leaf-a should include both hub AND leaf-c per fixture topology"
+			);
+		}
+	}
+
+	// get_outgoing_links — hub links to leaf-a, leaf-b, leaf-c
+	{
+		const r = await callTool("get_outgoing_links", { path: "links/hub.md" });
+		const text = textOf(r.result);
+		const targets = ["leaf-a", "leaf-b", "leaf-c"];
+		const missing = targets.filter((t) => !text.includes(t));
+		log(
+			`  get_outgoing_links links/hub.md → ${targets.length - missing.length}/${targets.length} expected targets (${fmt(r.elapsed)})`
+		);
+		if (missing.length) warn(`hub.md missing outgoing links: ${missing.join(", ")}`);
+	}
+
+	// list_tags — fixture has #alpha, #beta, #project/april
+	{
+		const r = await callTool("list_tags", {});
+		const text = textOf(r.result);
+		const expected = ["#alpha", "#beta", "#project/april"];
+		const missing = expected.filter((t) => !text.includes(t));
+		log(
+			`  list_tags → ${expected.length - missing.length}/${expected.length} expected tags present (${fmt(r.elapsed)})`
+		);
+		if (missing.length) warn(`list_tags missing: ${missing.join(", ")}`);
+	}
+
+	// find_by_tag — #project should match #project/april via nested matching
+	{
+		const r = await callTool("find_by_tag", {
+			tag: "project",
+			nested: true,
+		});
+		const text = textOf(r.result);
+		const found = text.includes("basics/with-tags.md");
+		log(
+			`  find_by_tag project (nested) → matches with-tags.md=${found} (${fmt(r.elapsed)})`
+		);
+		if (!found) warn("find_by_tag with nested=true should match #project/april");
+	}
+
+	// find_by_tag — #project with nested=false should NOT match
+	{
+		const r = await callTool("find_by_tag", {
+			tag: "project",
+			nested: false,
+		});
+		const text = textOf(r.result);
+		const found = text.includes("basics/with-tags.md");
+		log(
+			`  find_by_tag project (exact) → matches with-tags.md=${found} (${fmt(r.elapsed)})`
+		);
+		if (found) {
+			warn(
+				"find_by_tag with nested=false should NOT match #project/april — only an exact #project tag"
+			);
+		}
+	}
+
+	// search_vault — "Three Levels Deep" appears only in nested/deep/three/levels.md
+	{
+		const r = await callTool("search_vault", { query: "Three Levels Deep" });
+		const text = textOf(r.result);
+		const hit = text.includes("nested/deep/three/levels.md");
+		log(
+			`  search_vault 'Three Levels Deep' → found in expected file=${hit} (${fmt(r.elapsed)})`
+		);
+		if (!hit) warn("search_vault failed to find 'Three Levels Deep' in fixture");
+	}
+
+	// search_vault — case-insensitive by default
+	{
+		const r = await callTool("search_vault", { query: "THREE LEVELS DEEP" });
+		const text = textOf(r.result);
+		const hit = text.includes("nested/deep/three/levels.md");
+		log(
+			`  search_vault uppercase (case-insensitive default) → found=${hit} (${fmt(r.elapsed)})`
+		);
+		if (!hit) warn("search_vault should be case-insensitive by default");
+	}
+
 	log("\n─── negative tests ─────────────────────────────────────────");
 	try {
 		await callTool("view", { path: "../etc/passwd" });
