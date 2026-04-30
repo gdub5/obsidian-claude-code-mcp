@@ -596,6 +596,65 @@ describe("McpHttpServer Streamable HTTP (/mcp)", () => {
 		});
 	});
 
+	describe("batch lifecycle (no mixed initialize + other requests)", () => {
+		// Codex's fourth pass found that the lifecycle gate was per-HTTP-
+		// request, so a batch could mix initialize + tools/call and the
+		// tools/call would execute before initialize had stamped the
+		// session as authorized. These tests pin the rejection.
+
+		it("rejects [initialize, tools/list] mixed in a single batch", async () => {
+			const res = await postMcp([
+				{ jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+				{ jsonrpc: "2.0", id: 2, method: "tools/list" },
+			]);
+			expect(res.status).toBe(400);
+			const err = JSON.parse(res.body);
+			expect(err.error?.message).toMatch(/mix|initialize must complete/i);
+		});
+
+		it("rejects [tools/list, initialize] (order-independent)", async () => {
+			const res = await postMcp([
+				{ jsonrpc: "2.0", id: 1, method: "tools/list" },
+				{ jsonrpc: "2.0", id: 2, method: "initialize", params: {} },
+			]);
+			expect(res.status).toBe(400);
+		});
+
+		it("rejects multiple initialize requests in one batch", async () => {
+			const res = await postMcp([
+				{ jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+				{ jsonrpc: "2.0", id: 2, method: "initialize", params: {} },
+			]);
+			expect(res.status).toBe(400);
+			const err = JSON.parse(res.body);
+			expect(err.error?.message).toMatch(/Multiple initialize/i);
+		});
+
+		it("allows a batch of multiple non-initialize requests on a valid session", async () => {
+			// Sanity: the rejection is specifically for batches *containing
+			// initialize alongside other requests*. A batch of pure
+			// tool/utility requests is fine.
+			const init = await postMcp({
+				jsonrpc: "2.0",
+				id: 0,
+				method: "initialize",
+				params: {},
+			});
+			const sid = init.headers["mcp-session-id"] as string;
+			const res = await postMcp(
+				[
+					{ jsonrpc: "2.0", id: 1, method: "tools/list" },
+					{ jsonrpc: "2.0", id: 2, method: "ping" },
+				],
+				{ "Mcp-Session-Id": sid }
+			);
+			expect(res.status).toBe(200);
+			const payload = JSON.parse(res.body);
+			expect(Array.isArray(payload)).toBe(true);
+			expect(payload).toHaveLength(2);
+		});
+	});
+
 	describe("session lifecycle gate (failed initialize)", () => {
 		// A session minted by a failed/errored initialize must NOT be
 		// usable for tools/* — the handshake never completed.

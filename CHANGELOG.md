@@ -63,6 +63,13 @@ this is purely additive.
   *successful* initialize responses. Without this, a client could mint
   a session via a failed handshake and continue using it. Caught by
   the third adversarial pass.
+- **Mixed-batch rejection.** A JSON-RPC batch containing `initialize`
+  *and* any other request is rejected with `400` before any dispatch.
+  Otherwise the lifecycle gate (request-level) could be bypassed by
+  inlining a tool call alongside initialize — both would dispatch
+  before the session was authorized. Caught by the fourth adversarial
+  pass; covered by tests for the three permutations
+  (`[init, tool]`, `[tool, init]`, `[init, init]`).
 - **Integration harness fixed and tightened.** Auto-injects
   `MCP-Protocol-Version` on post-init `/mcp` calls; exits non-zero on
   any warning so a regression in the live test vault produces a real
@@ -83,14 +90,16 @@ this is purely additive.
   block that opens a parallel session over the modern transport and
   cross-checks tool count and dispatch behavior against the legacy
   `/sse` path.
-- **8 additional tests** across two adversarial-review fix passes:
+- **12 additional tests** across the adversarial-review fix passes:
   protocol-version validation (missing / unsupported / accepted /
   not-required-on-init / per-session-mismatch), idle expiry (expires
-  after 30 min, does NOT expire inside the window), and the session
-  lifecycle gate (post-init requests rejected on a session whose
-  initialize errored). Time-based tests use `vi.setSystemTime` so
+  after 30 min, does NOT expire inside the window), session lifecycle
+  gate (post-init requests rejected on a session whose initialize
+  errored), and mixed-batch rejection ([init, tool], [tool, init],
+  [init, init], and a sanity test that batches of multiple non-init
+  requests still work). Time-based tests use `vi.setSystemTime` so
   they're deterministic.
-- Total tests now **155** (was 130 in v1.1.10).
+- Total tests now **159** (was 130 in v1.1.10).
 
 ## v1.1.10 — 2026-04-30 (PR B: MetadataCache integration)
 

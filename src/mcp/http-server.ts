@@ -567,10 +567,50 @@ export class McpHttpServer {
 		// unload.
 		this.sweepExpiredSessions();
 
-		const sessionHeader = (req.headers["mcp-session-id"] as string) || null;
-		const isInitializeBatch = messages.some(
-			(m) => m && m.method === "initialize" && m.id !== undefined
+		// Reject mixed batches before any dispatch happens. The lifecycle
+		// gate is per-HTTP-request, so a batch like
+		//   [{"method":"initialize",...}, {"method":"tools/call",...}]
+		// would otherwise execute tools/call before initialize had a chance
+		// to stamp protocolVersion on the session — even when initialize
+		// errored. Rejecting at the boundary keeps the gate impossible to
+		// sidestep.
+		const requests = messages.filter(
+			(m) => m && m.id !== undefined && typeof m.method === "string"
 		);
+		const initRequests = requests.filter((m) => m.method === "initialize");
+		if (initRequests.length > 1) {
+			res.writeHead(400, { "Content-Type": "application/json" });
+			res.end(
+				JSON.stringify({
+					jsonrpc: "2.0",
+					error: {
+						code: -32600,
+						message:
+							"Multiple initialize requests in one batch are not allowed",
+					},
+					id: null,
+				})
+			);
+			return;
+		}
+		if (initRequests.length === 1 && requests.length > 1) {
+			res.writeHead(400, { "Content-Type": "application/json" });
+			res.end(
+				JSON.stringify({
+					jsonrpc: "2.0",
+					error: {
+						code: -32600,
+						message:
+							"Cannot mix `initialize` with other requests in a single batch — initialize must complete first",
+					},
+					id: null,
+				})
+			);
+			return;
+		}
+
+		const sessionHeader = (req.headers["mcp-session-id"] as string) || null;
+		const isInitializeBatch = initRequests.length === 1;
 
 		// Session validation
 		// - On initialize: client sends NO session id; we mint one.
