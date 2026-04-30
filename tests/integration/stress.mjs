@@ -487,6 +487,140 @@ async function main() {
 		if (!hit) warn("search_vault should be case-insensitive by default");
 	}
 
+	log("\n─── streamable HTTP transport (PR C — /mcp) ────────────────");
+	// New endpoint sits alongside /sse + /messages. Drives a parallel
+	// session over the modern transport. If anything diverges between the
+	// two (tool count, session handling, error shapes), we want to know.
+	{
+		const headers = {
+			"Content-Type": "application/json",
+			Authorization: `Bearer ${TOKEN}`,
+			Accept: "application/json",
+		};
+		const postMcp = (body, extra = {}) =>
+			new Promise((resolve, reject) => {
+				const data = JSON.stringify(body);
+				const r = http.request(
+					{
+						hostname: HOST,
+						port: PORT,
+						path: "/mcp",
+						method: "POST",
+						headers: { ...headers, ...extra, "Content-Length": Buffer.byteLength(data) },
+					},
+					(res) => {
+						const chunks = [];
+						res.on("data", (c) => chunks.push(c));
+						res.on("end", () =>
+							resolve({
+								status: res.statusCode,
+								headers: res.headers,
+								body: Buffer.concat(chunks).toString("utf8"),
+							})
+						);
+					}
+				);
+				r.on("error", reject);
+				r.write(data);
+				r.end();
+				setTimeout(() => r.destroy(new Error("mcp timeout")), 10000);
+			});
+
+		// initialize → expect 200 + Mcp-Session-Id header
+		const init = await postMcp({
+			jsonrpc: "2.0",
+			id: 1,
+			method: "initialize",
+			params: {
+				protocolVersion: "2024-11-05",
+				capabilities: {},
+				clientInfo: { name: "stress-mcp", version: "1.0.0" },
+			},
+		});
+		const mcpSid = init.headers["mcp-session-id"];
+		const initOk =
+			init.status === 200 && typeof mcpSid === "string" && mcpSid.length > 0;
+		log(`  POST /mcp initialize → status=${init.status} session=${initOk ? "ok" : "MISSING"}`);
+		if (!initOk) warn("Streamable HTTP initialize did not return Mcp-Session-Id");
+
+		// tools/list with the session header → expect same 13 tools as the SSE path
+		const list = await postMcp(
+			{ jsonrpc: "2.0", id: 2, method: "tools/list" },
+			{ "Mcp-Session-Id": mcpSid }
+		);
+		const listPayload = JSON.parse(list.body);
+		const mcpToolCount = listPayload.result?.tools?.length ?? 0;
+		log(
+			`  POST /mcp tools/list → ${mcpToolCount} tools (legacy /sse reported ${tools.result.tools.length})`
+		);
+		if (mcpToolCount !== tools.result.tools.length) {
+			warn("tools/list count differs between /mcp and /sse transports");
+		}
+
+		// A read-only tool call to prove the dispatch chain works end-to-end
+		const callRes = await postMcp(
+			{
+				jsonrpc: "2.0",
+				id: 3,
+				method: "tools/call",
+				params: { name: "get_workspace_files", arguments: {} },
+			},
+			{ "Mcp-Session-Id": mcpSid }
+		);
+		const callPayload = JSON.parse(callRes.body);
+		const callOk =
+			callRes.status === 200 &&
+			callPayload.result?.content?.[0]?.text?.includes(".md");
+		log(
+			`  POST /mcp tools/call(get_workspace_files) → ${callOk ? "ok" : "FAIL"}`
+		);
+		if (!callOk) warn("tools/call over /mcp did not return expected content");
+
+		// notification → expect 202 Accepted, empty body
+		const notif = await postMcp(
+			{ jsonrpc: "2.0", method: "notifications/initialized" },
+			{ "Mcp-Session-Id": mcpSid }
+		);
+		const notifOk = notif.status === 202 && notif.body === "";
+		log(
+			`  POST /mcp notifications/initialized → status=${notif.status}${notif.body ? " (body present!)" : ""}`
+		);
+		if (!notifOk) warn("Streamable HTTP notification handling broken");
+
+		// Wrong session id → 404
+		const bad = await postMcp(
+			{ jsonrpc: "2.0", id: 4, method: "tools/list" },
+			{ "Mcp-Session-Id": "00000000-0000-0000-0000-000000000000" }
+		);
+		log(`  POST /mcp with bogus session → status=${bad.status} (expect 404)`);
+		if (bad.status !== 404) warn("Bogus session id was not rejected with 404");
+
+		// DELETE /mcp → 204; subsequent request should 404
+		const del = await new Promise((resolve, reject) => {
+			const r = http.request(
+				{
+					hostname: HOST,
+					port: PORT,
+					path: "/mcp",
+					method: "DELETE",
+					headers: {
+						Authorization: `Bearer ${TOKEN}`,
+						"Mcp-Session-Id": mcpSid,
+					},
+				},
+				(res) => {
+					res.resume();
+					res.on("end", () => resolve(res.statusCode));
+				}
+			);
+			r.on("error", reject);
+			r.end();
+			setTimeout(() => r.destroy(new Error("delete timeout")), 5000);
+		});
+		log(`  DELETE /mcp → status=${del} (expect 204)`);
+		if (del !== 204) warn("DELETE /mcp did not return 204");
+	}
+
 	log("\n─── negative tests ─────────────────────────────────────────");
 	try {
 		await callTool("view", { path: "../etc/passwd" });

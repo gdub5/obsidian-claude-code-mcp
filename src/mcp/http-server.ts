@@ -206,6 +206,50 @@ export class McpHttpServer {
 					})
 				);
 			}
+		} else if (url.pathname === "/mcp") {
+			// Streamable HTTP transport (added in PR C, MCP spec 2025-03-26+).
+			// Sits alongside the legacy /sse + /messages pair so existing
+			// clients keep working unchanged.
+			if (req.method === "POST") {
+				await this.handleMcpPost(req, res);
+			} else if (req.method === "GET") {
+				// Server-initiated streams are optional in the spec and we
+				// don't yet need them — broadcasts go over the legacy /sse
+				// path. Refuse cleanly so a client that probes for stream
+				// support gets an honest answer rather than a hang.
+				res.writeHead(405, {
+					"Content-Type": "application/json",
+					Allow: "POST, OPTIONS",
+				});
+				res.end(
+					JSON.stringify({
+						jsonrpc: "2.0",
+						error: {
+							code: -32000,
+							message:
+								"Server-initiated streams not supported on /mcp; use POST.",
+						},
+						id: null,
+					})
+				);
+			} else if (req.method === "DELETE") {
+				await this.handleMcpDelete(req, res);
+			} else {
+				res.writeHead(405, {
+					"Content-Type": "application/json",
+					Allow: "POST, DELETE, OPTIONS",
+				});
+				res.end(
+					JSON.stringify({
+						jsonrpc: "2.0",
+						error: {
+							code: -32000,
+							message: "Method not allowed on /mcp",
+						},
+						id: null,
+					})
+				);
+			}
 		} else {
 			res.writeHead(404, { "Content-Type": "application/json" });
 			res.end(
@@ -213,7 +257,8 @@ export class McpHttpServer {
 					jsonrpc: "2.0",
 					error: {
 						code: -32002,
-						message: "Not found. Use /sse or /messages endpoints.",
+						message:
+							"Not found. Use /mcp (Streamable HTTP) or /sse + /messages (legacy SSE).",
 					},
 				})
 			);
@@ -379,6 +424,210 @@ export class McpHttpServer {
 		res.end();
 	}
 
+	/**
+	 * Handle a POST to the Streamable HTTP `/mcp` endpoint. Behavior:
+	 *
+	 *   1. Body is one JSON-RPC object or an array of them.
+	 *   2. If every message is a notification or response (no `id`
+	 *      paired with `method`), dispatch them and reply 202 Accepted.
+	 *   3. Otherwise dispatch each request, collect the responses, and
+	 *      reply with the response JSON (single object if one in / one out,
+	 *      array if multiple).
+	 *   4. On `initialize`, mint a session and return its id in the
+	 *      `Mcp-Session-Id` response header. On every other request the
+	 *      client MUST send the same id back as a header — we validate.
+	 *   5. After init, the client MUST also send `MCP-Protocol-Version`.
+	 *      We accept any version string (we currently implement
+	 *      `2024-11-05`) — a client requesting a version we don't
+	 *      implement gets the supported one back via the initialize
+	 *      response and is responsible for adapting.
+	 *
+	 * Streaming responses (Content-Type: text/event-stream) are NOT used
+	 * by this server because none of our handlers produce streamed output.
+	 * If a future tool wants progress notifications we'll add it then.
+	 */
+	private async handleMcpPost(
+		req: http.IncomingMessage,
+		res: http.ServerResponse
+	): Promise<void> {
+		// Accept negotiation. We always reply with JSON; if the client
+		// only accepts text/event-stream, that's a polite 406 — we don't
+		// pretend to support streams we don't implement.
+		const accept = (req.headers.accept || "").toLowerCase();
+		const wantsJson = accept === "" || accept.includes("application/json") || accept.includes("*/*");
+		if (!wantsJson) {
+			res.writeHead(406, { "Content-Type": "application/json" });
+			res.end(
+				JSON.stringify({
+					jsonrpc: "2.0",
+					error: {
+						code: -32000,
+						message:
+							"This server only returns application/json on /mcp; streaming responses are not supported.",
+					},
+					id: null,
+				})
+			);
+			return;
+		}
+
+		const body = await this.readRequestBody(req);
+		let messages: any[];
+		try {
+			const parsed = JSON.parse(body);
+			messages = Array.isArray(parsed) ? parsed : [parsed];
+		} catch {
+			res.writeHead(400, { "Content-Type": "application/json" });
+			res.end(
+				JSON.stringify({
+					jsonrpc: "2.0",
+					error: { code: -32700, message: "Parse error" },
+					id: null,
+				})
+			);
+			return;
+		}
+
+		if (messages.length === 0) {
+			res.writeHead(400, { "Content-Type": "application/json" });
+			res.end(
+				JSON.stringify({
+					jsonrpc: "2.0",
+					error: { code: -32600, message: "Empty batch" },
+					id: null,
+				})
+			);
+			return;
+		}
+
+		const sessionHeader = (req.headers["mcp-session-id"] as string) || null;
+		const isInitializeBatch = messages.some(
+			(m) => m && m.method === "initialize" && m.id !== undefined
+		);
+
+		// Session validation
+		// - On initialize: client sends NO session id; we mint one.
+		// - On every other request: client MUST send the session id we
+		//   gave them. Reject with 404 if missing or unknown — matches
+		//   the spec's "session not found" semantics.
+		let sessionId: string;
+		if (isInitializeBatch) {
+			sessionId = sessionHeader && this.sessions.has(sessionHeader)
+				? sessionHeader
+				: crypto.randomUUID();
+			if (!this.sessions.has(sessionId)) {
+				this.sessions.set(sessionId, {
+					id: sessionId,
+					createdAt: Date.now(),
+					streams: new Set(),
+				});
+				this.config.onConnection?.();
+			}
+		} else {
+			if (!sessionHeader) {
+				res.writeHead(400, { "Content-Type": "application/json" });
+				res.end(
+					JSON.stringify({
+						jsonrpc: "2.0",
+						error: {
+							code: -32600,
+							message:
+								"Missing Mcp-Session-Id header (required after initialize)",
+						},
+						id: null,
+					})
+				);
+				return;
+			}
+			if (!this.sessions.has(sessionHeader)) {
+				res.writeHead(404, { "Content-Type": "application/json" });
+				res.end(
+					JSON.stringify({
+						jsonrpc: "2.0",
+						error: {
+							code: -32600,
+							message: "Unknown Mcp-Session-Id (session expired or never opened)",
+						},
+						id: null,
+					})
+				);
+				return;
+			}
+			sessionId = sessionHeader;
+		}
+
+		// Dispatch each message. For requests, collect the response;
+		// for notifications, fire-and-forget.
+		const responses: McpResponse[] = [];
+		for (const msg of messages) {
+			if (!msg || typeof msg !== "object") continue;
+			const isRequest = msg.id !== undefined && typeof msg.method === "string";
+			const isNotification = msg.id === undefined && typeof msg.method === "string";
+
+			if (isRequest) {
+				const response = await dispatchAndCollect(
+					msg as McpRequest,
+					this.config.onMessage
+				);
+				responses.push(response);
+			} else if (isNotification) {
+				// Fire-and-forget — handlers ignore the no-op reply.
+				this.config.onMessage(msg as McpRequest, () => {});
+			}
+			// Anything else (orphan response, malformed) is silently dropped.
+		}
+
+		// Set Mcp-Session-Id on every response so clients have one source
+		// of truth, not just initialize replies.
+		res.setHeader("Mcp-Session-Id", sessionId);
+
+		// All notifications → 202 Accepted, no body.
+		if (responses.length === 0) {
+			res.writeHead(202);
+			res.end();
+			return;
+		}
+
+		// Return single object or array based on input shape (mirrors how
+		// JSON-RPC batching works in the legacy /messages endpoint).
+		const wasBatch = Array.isArray(JSON.parse(body));
+		const payload = wasBatch ? responses : responses[0];
+
+		res.writeHead(200, { "Content-Type": "application/json" });
+		res.end(JSON.stringify(payload));
+	}
+
+	/**
+	 * Explicit session termination via DELETE /mcp + Mcp-Session-Id header.
+	 * Optional in the spec but cheap to support; lets clients release
+	 * server-side state cleanly when they're done.
+	 */
+	private async handleMcpDelete(
+		req: http.IncomingMessage,
+		res: http.ServerResponse
+	): Promise<void> {
+		const sessionId = (req.headers["mcp-session-id"] as string) || null;
+		if (!sessionId) {
+			res.writeHead(400, { "Content-Type": "application/json" });
+			res.end(
+				JSON.stringify({
+					jsonrpc: "2.0",
+					error: {
+						code: -32600,
+						message: "DELETE /mcp requires Mcp-Session-Id header",
+					},
+					id: null,
+				})
+			);
+			return;
+		}
+		if (this.sessions.delete(sessionId)) {
+			this.config.onDisconnection?.();
+		}
+		res.writeHead(204);
+		res.end();
+	}
+
 	private sendSSEMessage(
 		res: http.ServerResponse,
 		event: string,
@@ -412,10 +661,17 @@ export class McpHttpServer {
 		// blocked at validateOrigin() before this point. We don't reflect
 		// arbitrary Origin headers.
 		res.setHeader("Access-Control-Allow-Origin", "http://localhost");
-		res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+		res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
 		res.setHeader(
 			"Access-Control-Allow-Headers",
-			"Content-Type, Accept, Authorization, Last-Event-ID"
+			// Mcp-Session-Id and MCP-Protocol-Version are required by the
+			// Streamable HTTP transport (added in PR C). Last-Event-ID is
+			// kept for the legacy SSE path.
+			"Content-Type, Accept, Authorization, Last-Event-ID, Mcp-Session-Id, MCP-Protocol-Version"
+		);
+		res.setHeader(
+			"Access-Control-Expose-Headers",
+			"Mcp-Session-Id, MCP-Protocol-Version"
 		);
 		res.setHeader("Access-Control-Max-Age", "86400");
 	}
@@ -443,3 +699,47 @@ export class McpHttpServer {
 		}
 	}
 }
+
+/**
+ * Bridge between the existing onMessage(req, reply) callback shape and a
+ * Promise-returning function. The handler chain calls `reply(msg)` at most
+ * once with the response payload (sans `jsonrpc` / `id`); we wrap that
+ * payload with the framing so the caller gets a complete McpResponse.
+ *
+ * Times out after 10s as a defense against a handler that never replies —
+ * the transport layer should never hang an HTTP request indefinitely.
+ */
+function dispatchAndCollect(
+	req: McpRequest,
+	dispatch: (request: McpRequest, reply: (msg: any) => void) => void
+): Promise<McpResponse> {
+	return new Promise((resolve) => {
+		let settled = false;
+		const timer = setTimeout(() => {
+			if (!settled) {
+				settled = true;
+				resolve({
+					jsonrpc: "2.0",
+					id: req.id,
+					error: {
+						code: -32603,
+						message: "Handler timed out waiting for reply",
+					},
+				});
+			}
+		}, 10_000);
+
+		dispatch(req, (msg) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			resolve({
+				jsonrpc: "2.0",
+				id: req.id,
+				...msg,
+			});
+		});
+	});
+}
+
+

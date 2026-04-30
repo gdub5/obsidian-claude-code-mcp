@@ -1,5 +1,67 @@
 # Changelog
 
+## v1.1.11 — 2026-04-30 (PR C: Streamable HTTP transport)
+
+Adds a new `/mcp` endpoint implementing the Streamable HTTP transport
+introduced in MCP spec `2025-03-26` (refined through `2025-06-18` and
+later). Existing `/sse` + `/messages` clients keep working unchanged —
+this is purely additive.
+
+### What's new
+
+- **`POST /mcp`** — single-endpoint JSON-RPC over HTTP. Body is one
+  JSON-RPC message or an array. Responses come back inline as
+  `application/json`; notifications-only batches return `202 Accepted`
+  with no body.
+- **Session lifecycle.** `initialize` mints a session id; the server
+  returns it in the `Mcp-Session-Id` response header. Subsequent
+  requests must echo it back as a header. Unknown / missing session ids
+  are rejected with `404` / `400` respectively.
+- **`DELETE /mcp`** — explicit session termination. Clients can release
+  server-side state cleanly when they're done.
+- **`GET /mcp`** — declined with `405 Method Not Allowed` (server-
+  initiated streams aren't implemented yet; broadcasts still go over
+  legacy `/sse` for now). The `Allow` response header advertises which
+  methods are supported, so a probing client gets an honest answer.
+- **CORS** updated: allows `Mcp-Session-Id` and `MCP-Protocol-Version`
+  request headers, and exposes `Mcp-Session-Id` to readers via
+  `Access-Control-Expose-Headers`.
+
+### What's intentionally out of scope
+
+- **Streaming responses** (`Content-Type: text/event-stream` on POST
+  responses). None of our handlers actually stream output, so we
+  always return JSON. A client that requests *only* `text/event-stream`
+  via `Accept` gets a clean `406` rather than a misleading hang.
+- **Server-initiated streams** (`GET /mcp`). Required by some clients
+  for progress notifications and server-driven prompts; not needed by
+  any of the current tools. Will land if a tool needs it.
+- **Newer MCP features** (elicitation, structured tool output via
+  `outputSchema`/`structuredContent`, `MCP-Protocol-Version` validation
+  beyond pass-through). The plugin still implements the `2024-11-05`
+  protocol — only the *transport* is new.
+
+### Reliability
+
+- **10-second handler timeout** on every dispatched request. If a tool
+  handler never replies, the client gets a JSON-RPC `-32603` after 10s
+  rather than an HTTP request that hangs forever.
+- **Origin check + bearer-token auth** apply unchanged. A request to
+  `/mcp` goes through the same gate as `/sse` and `/messages`.
+
+### Tests
+
+- **17 new unit tests** in `tests/mcp/http-server.test.ts` covering:
+  auth (no token / wrong token), session lifecycle (mint / reject
+  missing / reject unknown / reuse), body shapes (single / array /
+  notification-only / parse-error / empty-batch), Accept-header
+  negotiation, method routing (GET → 405), and DELETE.
+- **Integration stress harness** extended with a dedicated `/mcp`
+  block that opens a parallel session over the modern transport and
+  cross-checks tool count and dispatch behavior against the legacy
+  `/sse` path.
+- Total tests now **147** (was 130 in v1.1.10).
+
 ## v1.1.10 — 2026-04-30 (PR B: MetadataCache integration)
 
 Six new tools backed by Obsidian's MetadataCache. Shifts the plugin from a
