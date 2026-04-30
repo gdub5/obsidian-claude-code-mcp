@@ -1,5 +1,100 @@
 # Changelog
 
+## v1.1.12 — 2026-04-30 (Spec upgrade: support MCP `2025-11-25`)
+
+The plugin still implemented the `2024-11-05` wire format exclusively;
+modern clients (MCP Inspector, future Claude Desktop revisions) speak
+the `2025-11-25` revision. This release adds support for both versions
+via real handshake negotiation, plus the tool-annotation hints the
+spec recommends (added in `2025-03-26`, refined since).
+
+### Protocol-version negotiation
+
+- Server now advertises support for both `2025-11-25` (preferred /
+  newest) and `2024-11-05` (legacy / what we shipped before).
+- The `initialize` handler returns whichever version the client
+  requested if we support it; otherwise it returns the newest version
+  we support and lets the client decide whether to disconnect.
+- Per-session validation already in place from PR C: subsequent
+  requests must carry `MCP-Protocol-Version` matching the version this
+  session negotiated. A client that initialized with `2024-11-05`
+  cannot send `2025-11-25` later, and vice versa.
+- The `MCP-Protocol-Version` header strict-required behavior is
+  unchanged. Spec says servers SHOULD assume `2025-03-26` if the
+  header is missing AND there's no other way to identify the version
+  — but we always have the per-session stamped version from
+  initialize, so the SHOULD doesn't apply to us. Strict requirement
+  remains.
+
+### Tool annotations
+
+Every tool now declares the four MCP safety hints
+(`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`)
+plus a human-readable `title`. Clients that respect annotations can:
+
+- Auto-approve calls to read-only / closed-world tools without
+  prompting the user every time.
+- Surface stronger confirmations on `destructiveHint: true` tools.
+- Skip retry logic on `idempotentHint: false` tools.
+
+Concrete categorization:
+- **Read-only** (auto-approve candidates): `view`,
+  `get_current_file`, `get_workspace_files`, `get_frontmatter`,
+  `get_backlinks`, `get_outgoing_links`, `list_tags`, `find_by_tag`,
+  `search_vault`.
+- **Write, additive** (low-risk): `create`, `insert`.
+- **Write, destructive** (overwrites content): `str_replace`.
+- **Escape hatch** (arbitrary code, can do anything):
+  `obsidian_api` — `destructiveHint: true`, `openWorldHint: true`.
+
+### What's intentionally NOT in this release
+
+The spec changes between `2024-11-05` and `2025-11-25` cover a lot
+more ground than transport + annotations. Skipped here because we
+don't yet need them and adding them without test cases would be
+worse than the current honest "we don't implement that":
+
+- **Structured tool output** (`outputSchema` / `structuredContent`,
+  added 2025-06-18). Our tools return `content[].text` only.
+- **Resources / prompts**. We declared neither capability; not
+  implementing either.
+- **Sampling / elicitation / roots**. These are *client* features —
+  the server requests, the client implements. We don't drive them.
+- **Tasks** (experimental, 2025-11-25). Long-running deferred
+  results.
+- **Icons metadata** (2025-11-25). Cosmetic.
+- **OAuth Client ID Metadata Documents / OpenID Connect Discovery**
+  (2025-11-25). We use a simple bearer token; no OAuth.
+- **Input validation as Tool Execution Errors** (2025-11-25
+  clarification). Today our tools return JSON-RPC `-32602` for bad
+  params; spec now recommends `result.isError: true` instead so the
+  model can self-correct. Behavioral change, deferred to a follow-up.
+
+### Tests
+
+- 9 new tests: protocol-version negotiation (latest by default,
+  echoes supported version, falls back on unsupported, both versions
+  reachable); annotations presence + correctness on every tool;
+  metadata tools categorized as read-only/idempotent.
+- Total tests now **174** (was 165 in v1.1.11).
+
+### Validated against MCP Inspector
+
+Before commit, exercised the live test vault via
+`@modelcontextprotocol/inspector --cli` over Streamable HTTP:
+
+```
+npx @modelcontextprotocol/inspector --cli http://localhost:48888/mcp \
+  --transport http \
+  --method tools/list \
+  --header "Authorization: Bearer <token>"
+```
+
+Inspector connected, completed the handshake, returned the 13 tools.
+A `tools/call view` round-tripped clean. (v1.1.11 was the running
+build during that check; v1.1.12 changes the version string and adds
+annotations but the wire-format path is unchanged.)
+
 ## v1.1.11 — 2026-04-30 (PR C: Streamable HTTP transport)
 
 Adds a new `/mcp` endpoint implementing the Streamable HTTP transport

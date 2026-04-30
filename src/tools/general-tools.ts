@@ -14,6 +14,13 @@ export const GENERAL_TOOL_DEFINITIONS: ToolDefinition[] = [
 			type: "object",
 			properties: {},
 		},
+		annotations: {
+			title: "Get Current File",
+			readOnlyHint: true,
+			destructiveHint: false,
+			idempotentHint: true,
+			openWorldHint: false,
+		},
 	},
 	{
 		name: "get_workspace_files",
@@ -27,6 +34,13 @@ export const GENERAL_TOOL_DEFINITIONS: ToolDefinition[] = [
 					description: "Optional pattern to filter files",
 				},
 			},
+		},
+		annotations: {
+			title: "List Vault Files",
+			readOnlyHint: true,
+			destructiveHint: false,
+			idempotentHint: true,
+			openWorldHint: false,
 		},
 	},
 	{
@@ -51,6 +65,13 @@ export const GENERAL_TOOL_DEFINITIONS: ToolDefinition[] = [
 					},
 				},
 			},
+		},
+		annotations: {
+			title: "View File or Directory",
+			readOnlyHint: true,
+			destructiveHint: false,
+			idempotentHint: true,
+			openWorldHint: false,
 		},
 	},
 	{
@@ -77,6 +98,13 @@ export const GENERAL_TOOL_DEFINITIONS: ToolDefinition[] = [
 				},
 			},
 		},
+		annotations: {
+			title: "Replace Text in File",
+			readOnlyHint: false,
+			destructiveHint: true, // overwrites existing content
+			idempotentHint: false, // second call would fail (no match)
+			openWorldHint: false,
+		},
 	},
 	{
 		name: "create",
@@ -96,6 +124,13 @@ export const GENERAL_TOOL_DEFINITIONS: ToolDefinition[] = [
 					description: "The content to write to the new file",
 				},
 			},
+		},
+		annotations: {
+			title: "Create File",
+			readOnlyHint: false,
+			destructiveHint: false, // refuses to overwrite existing files
+			idempotentHint: false, // second call errors (already exists)
+			openWorldHint: false,
 		},
 	},
 	{
@@ -120,6 +155,13 @@ export const GENERAL_TOOL_DEFINITIONS: ToolDefinition[] = [
 					description: "The text to insert",
 				},
 			},
+		},
+		annotations: {
+			title: "Insert Text at Line",
+			readOnlyHint: false,
+			destructiveHint: false, // additive, doesn't remove content
+			idempotentHint: false, // each call inserts again
+			openWorldHint: false,
 		},
 	},
 	{
@@ -153,6 +195,13 @@ How to use:
 						"The full function body, as a plain string, to be called with the Obsidian `app` instance as the first argument and `obsidian` module as the second argument.",
 				},
 			},
+		},
+		annotations: {
+			title: "Run Obsidian API Code (DANGEROUS)",
+			readOnlyHint: false,
+			destructiveHint: true, // can do anything — vault.delete, etc.
+			idempotentHint: false,
+			openWorldHint: true, // arbitrary code execution; can reach beyond the vault
 		},
 	},
 ];

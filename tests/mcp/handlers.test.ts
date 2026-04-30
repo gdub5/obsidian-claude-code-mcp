@@ -34,14 +34,57 @@ function makeHandlers() {
 
 describe("McpHandlers", () => {
 	describe("initialize", () => {
-		it("returns the 2024-11-05 protocol version", async () => {
+		it("returns the latest supported protocol version when client doesn't specify", async () => {
 			const { handlers } = makeHandlers();
 			const { reply, calls } = makeReply();
 
+			// Empty params → no protocolVersion requested → server picks
+			// the latest version it supports (currently 2025-11-25).
 			await handlers.handleHttpRequest(req("initialize", {}), reply);
 
 			expect(calls).toHaveLength(1);
+			expect(calls[0].result?.protocolVersion).toBe("2025-11-25");
+		});
+
+		it("echoes back a supported version when the client requests it", async () => {
+			const { handlers } = makeHandlers();
+			const { reply, calls } = makeReply();
+
+			await handlers.handleHttpRequest(
+				req("initialize", { protocolVersion: "2024-11-05" }),
+				reply
+			);
+
+			// Spec: server must echo the client's version if supported.
 			expect(calls[0].result?.protocolVersion).toBe("2024-11-05");
+		});
+
+		it("falls back to latest when the client requests an unsupported version", async () => {
+			const { handlers } = makeHandlers();
+			const { reply, calls } = makeReply();
+
+			await handlers.handleHttpRequest(
+				req("initialize", { protocolVersion: "1999-12-31" }),
+				reply
+			);
+
+			// Spec: when client's version isn't supported, server returns
+			// the latest it supports. Client then decides whether it can
+			// adapt; if not, it disconnects.
+			expect(calls[0].result?.protocolVersion).toBe("2025-11-25");
+		});
+
+		it("supports both 2024-11-05 and 2025-11-25", async () => {
+			const { handlers } = makeHandlers();
+
+			for (const v of ["2024-11-05", "2025-11-25"]) {
+				const { reply, calls } = makeReply();
+				await handlers.handleHttpRequest(
+					req("initialize", { protocolVersion: v }),
+					reply
+				);
+				expect(calls[0].result?.protocolVersion).toBe(v);
+			}
 		});
 
 		it("declares only capabilities that are actually implemented", async () => {

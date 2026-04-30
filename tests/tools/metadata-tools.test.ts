@@ -61,6 +61,20 @@ describe("METADATA_TOOL_DEFINITIONS", () => {
 			"search_vault",
 		]);
 	});
+
+	it("every metadata tool is annotated read-only + idempotent + closed-world", () => {
+		// All metadata tools query the vault — they don't mutate, don't
+		// reach beyond the vault, and the same input gives the same
+		// answer. Pin those properties so future contributors don't
+		// silently weaken them.
+		for (const def of METADATA_TOOL_DEFINITIONS) {
+			expect(def.annotations, `${def.name} missing annotations`).toBeDefined();
+			expect(def.annotations?.readOnlyHint).toBe(true);
+			expect(def.annotations?.destructiveHint).toBe(false);
+			expect(def.annotations?.idempotentHint).toBe(true);
+			expect(def.annotations?.openWorldHint).toBe(false);
+		}
+	});
 });
 
 // ──────────────────────────────────────────────────────────────────────

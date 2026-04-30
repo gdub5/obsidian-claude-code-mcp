@@ -37,13 +37,21 @@ interface Session {
 const MCP_SESSION_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 
 /**
- * Versions the server actually implements. Clients sending a different
- * version on a post-initialize request are rejected before we dispatch.
- * Server can still accept the version requested in `initialize` (the
- * handler picks one to advertise back); this set guards subsequent
- * requests against version-skew bugs.
+ * Versions the server actually implements at the wire-format level.
+ * Used in two places:
+ *   1. The `initialize` handler picks one of these as the negotiated
+ *      version (whichever the client requested if supported, else the
+ *      newest one).
+ *   2. The post-init request gate stamps the negotiated version on the
+ *      session; subsequent requests must present a header in this set
+ *      AND match the per-session value.
+ *
+ * Keep in sync with `SUPPORTED_PROTOCOL_VERSIONS` in `handlers.ts`.
+ * They could be one constant; we duplicate to keep the transport and
+ * handler layers cleanly decoupled — a future refactor can fold them.
  */
 const SUPPORTED_MCP_PROTOCOL_VERSIONS: ReadonlySet<string> = new Set([
+	"2025-11-25",
 	"2024-11-05",
 ]);
 

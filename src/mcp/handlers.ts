@@ -10,8 +10,44 @@ export interface HttpMcpReplyFunction {
 	(msg: Omit<import("./types").McpResponse, "jsonrpc" | "id">): void;
 }
 
-const PROTOCOL_VERSION = "2024-11-05";
+/**
+ * Protocol versions this server understands at the wire-format level.
+ *
+ * Order matters: this is preference order. When negotiating with a client,
+ * we pick the version the client requested if it's in this set, otherwise
+ * we fall back to the first entry (`LATEST`) and let the client decide
+ * whether it can speak it.
+ *
+ * We support both the modern spec (2025-11-25) and the original spec
+ * (2024-11-05) because the wire format requirements that affect this
+ * server haven't materially diverged — Streamable HTTP, session ids,
+ * notifications, capability negotiation. Newer spec features (sampling
+ * tool calls, URL elicitation, tasks, icons) are optional and we don't
+ * advertise capabilities we don't implement.
+ */
+const SUPPORTED_PROTOCOL_VERSIONS = ["2025-11-25", "2024-11-05"] as const;
+const LATEST_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0];
 const SERVER_NAME = "obsidian-claude-code-mcp";
+
+/**
+ * Pick the version we'll honor for this connection. The MCP spec
+ * (2025-11-25/lifecycle#version-negotiation) tells servers to:
+ *
+ *   - reply with the SAME version the client requested if supported,
+ *   - otherwise reply with the latest version the server supports.
+ *
+ * Client then decides whether it can speak our chosen version; if not,
+ * it disconnects.
+ */
+function negotiateProtocolVersion(requested: unknown): string {
+	if (
+		typeof requested === "string" &&
+		(SUPPORTED_PROTOCOL_VERSIONS as readonly string[]).includes(requested)
+	) {
+		return requested;
+	}
+	return LATEST_PROTOCOL_VERSION;
+}
 
 export class McpHandlers {
 	private wsToolRegistry: ToolRegistry;
@@ -111,17 +147,22 @@ export class McpHandlers {
 	}
 
 	private async handleInitialize(
-		_req: McpRequest,
+		req: McpRequest,
 		reply: McpReplyFunction | HttpMcpReplyFunction
 	): Promise<void> {
 		try {
+			const requestedVersion = (req.params as any)?.protocolVersion;
+			const negotiatedVersion = negotiateProtocolVersion(requestedVersion);
 			reply({
 				result: {
-					protocolVersion: PROTOCOL_VERSION,
+					protocolVersion: negotiatedVersion,
 					capabilities: {
 						// Only advertise capabilities we actually implement.
-						// `roots` is a CLIENT capability per spec.
-						// `prompts` and `resources` are not implemented yet.
+						// `roots`, `sampling`, `elicitation` are CLIENT
+						// capabilities per spec — never advertised by a
+						// server. `prompts` and `resources` aren't
+						// implemented yet so we don't advertise them
+						// either (a client must not depend on them).
 						tools: {
 							listChanged: false,
 						},

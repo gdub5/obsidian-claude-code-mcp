@@ -46,6 +46,16 @@ const SEARCH_MAX_BYTES_SCANNED = 50 * 1024 * 1024;
 // All metadata tools sit under category "workspace" — they operate on
 // the vault's MetadataCache rather than file contents directly.
 
+// All metadata tools are read-only and don't reach outside the vault, so
+// they share the same annotations shape — broken out into a constant to
+// keep each definition compact.
+const METADATA_READONLY_ANNOTATIONS = {
+	readOnlyHint: true,
+	destructiveHint: false,
+	idempotentHint: true,
+	openWorldHint: false,
+} as const;
+
 export const METADATA_TOOL_DEFINITIONS: ToolDefinition[] = [
 	{
 		name: "get_frontmatter",
@@ -62,6 +72,7 @@ export const METADATA_TOOL_DEFINITIONS: ToolDefinition[] = [
 				},
 			},
 		},
+		annotations: { title: "Get Frontmatter", ...METADATA_READONLY_ANNOTATIONS },
 	},
 	{
 		name: "get_backlinks",
@@ -79,6 +90,7 @@ export const METADATA_TOOL_DEFINITIONS: ToolDefinition[] = [
 				},
 			},
 		},
+		annotations: { title: "Get Backlinks", ...METADATA_READONLY_ANNOTATIONS },
 	},
 	{
 		name: "get_outgoing_links",
@@ -95,6 +107,10 @@ export const METADATA_TOOL_DEFINITIONS: ToolDefinition[] = [
 				},
 			},
 		},
+		annotations: {
+			title: "Get Outgoing Links",
+			...METADATA_READONLY_ANNOTATIONS,
+		},
 	},
 	{
 		name: "list_tags",
@@ -107,6 +123,7 @@ export const METADATA_TOOL_DEFINITIONS: ToolDefinition[] = [
 			type: "object",
 			properties: {},
 		},
+		annotations: { title: "List Tags", ...METADATA_READONLY_ANNOTATIONS },
 	},
 	{
 		name: "find_by_tag",
@@ -128,6 +145,7 @@ export const METADATA_TOOL_DEFINITIONS: ToolDefinition[] = [
 				},
 			},
 		},
+		annotations: { title: "Find Notes by Tag", ...METADATA_READONLY_ANNOTATIONS },
 	},
 	{
 		name: "search_vault",
@@ -153,6 +171,7 @@ export const METADATA_TOOL_DEFINITIONS: ToolDefinition[] = [
 				},
 			},
 		},
+		annotations: { title: "Search Vault", ...METADATA_READONLY_ANNOTATIONS },
 	},
 ];
 

@@ -61,6 +61,62 @@ describe("GENERAL_TOOL_DEFINITIONS", () => {
 			expect(def.inputSchema.properties).toBeDefined();
 		}
 	});
+
+	it("every tool carries safety annotations (MCP spec 2025-03-26+)", () => {
+		// Annotations are advisory hints clients use to decide whether
+		// to auto-approve a call. Each tool must declare all four:
+		// readOnlyHint, destructiveHint, idempotentHint, openWorldHint.
+		// Forgetting one (especially destructiveHint=true on a write
+		// tool) defeats the purpose of having them.
+		for (const def of GENERAL_TOOL_DEFINITIONS) {
+			expect(def.annotations, `${def.name} missing annotations`).toBeDefined();
+			expect(def.annotations?.title, `${def.name} missing title`).toBeDefined();
+			expect(
+				typeof def.annotations?.readOnlyHint,
+				`${def.name} missing readOnlyHint`
+			).toBe("boolean");
+			expect(
+				typeof def.annotations?.destructiveHint,
+				`${def.name} missing destructiveHint`
+			).toBe("boolean");
+			expect(
+				typeof def.annotations?.idempotentHint,
+				`${def.name} missing idempotentHint`
+			).toBe("boolean");
+			expect(
+				typeof def.annotations?.openWorldHint,
+				`${def.name} missing openWorldHint`
+			).toBe("boolean");
+		}
+	});
+
+	it("classifies write tools as not-readOnly and read tools as readOnly", () => {
+		// Spot-check the consistency of annotations against what each tool
+		// actually does. A write tool marked readOnly would cause clients
+		// to skip safety prompts.
+		const byName = new Map(
+			GENERAL_TOOL_DEFINITIONS.map((d) => [d.name, d.annotations!])
+		);
+
+		// Read-side
+		expect(byName.get("view")?.readOnlyHint).toBe(true);
+		expect(byName.get("get_current_file")?.readOnlyHint).toBe(true);
+		expect(byName.get("get_workspace_files")?.readOnlyHint).toBe(true);
+
+		// Write-side
+		expect(byName.get("create")?.readOnlyHint).toBe(false);
+		expect(byName.get("str_replace")?.readOnlyHint).toBe(false);
+		expect(byName.get("insert")?.readOnlyHint).toBe(false);
+
+		// str_replace overwrites content → destructive
+		expect(byName.get("str_replace")?.destructiveHint).toBe(true);
+		// create refuses to overwrite → not destructive (it's additive)
+		expect(byName.get("create")?.destructiveHint).toBe(false);
+
+		// obsidian_api is the escape hatch — must signal danger clearly
+		expect(byName.get("obsidian_api")?.destructiveHint).toBe(true);
+		expect(byName.get("obsidian_api")?.openWorldHint).toBe(true);
+	});
 });
 
 // ──────────────────────────────────────────────────────────────────────
