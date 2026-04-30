@@ -72,12 +72,20 @@ this is purely additive.
   initial mixed-batch check counted only id-bearing requests, leaving
   side-effecting tool calls sent as notifications (no id) able to slip
   through; counting all method-bearing messages closes that gap.
-- **Notifications-namespace guard.** Even outside batches, a
-  notification (no id) is dispatched only if its method begins with
-  `notifications/`. A bare `tools/call` or `tools/list` sent without
-  an id no longer fires the handler — that pattern has no legitimate
-  use and would otherwise let a side-effecting tool run without a
-  visible response in the request/response stream.
+- **Notifications-namespace guard, applied uniformly.** A notification
+  (no id) is dispatched only if its method begins with `notifications/`.
+  A bare `tools/call` or `tools/list` sent without an id no longer
+  fires the handler — that pattern has no legitimate use and would
+  otherwise let a side-effecting tool run without a visible response.
+  Now applied via a shared helper (`isLegitimateNotification`) at both
+  `/mcp` and the legacy `/messages` paths; the sixth adversarial pass
+  caught that the initial implementation only covered `/mcp`.
+- **Reject `initialize` sent as a notification.** The Streamable HTTP
+  transport requires an id on `initialize` to return `serverInfo` and
+  the negotiated `protocolVersion`. The expanded mixed-batch check
+  briefly let an idless `initialize` create a session (which would
+  then never complete handshake) — caught by the sixth adversarial
+  pass. Now refused with `400` before any session is minted.
 - **Integration harness fixed and tightened.** Auto-injects
   `MCP-Protocol-Version` on post-init `/mcp` calls; exits non-zero on
   any warning so a regression in the live test vault produces a real
@@ -107,7 +115,9 @@ this is purely additive.
   [init, init], and a sanity test that batches of multiple non-init
   requests still work). Time-based tests use `vi.setSystemTime` so
   they're deterministic.
-- Total tests now **162** (was 130 in v1.1.10).
+- Total tests now **165** (was 130 in v1.1.10). Includes regression
+  tests for the legacy `/messages` namespace guard so the same bypass
+  shape can't reappear on either transport.
 
 ## v1.1.10 — 2026-04-30 (PR B: MetadataCache integration)
 

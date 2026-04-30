@@ -422,11 +422,19 @@ export class McpHttpServer {
 		);
 
 		if (!hasRequests) {
-			// Only responses/notifications - return 202 Accepted
+			// Only responses/notifications — return 202 Accepted.
+			// Use the shared notification predicate so the same rule
+			// applies on both /messages and /mcp: a method-bearing
+			// message without an id is dispatched ONLY if it's a
+			// `notifications/*` method. A bare `tools/call` without
+			// id is malformed and must not reach the handler.
 			for (const msg of messages) {
-				if (msg.method) {
-					// Handle notification
+				if (isLegitimateNotification(msg)) {
 					this.config.onMessage(msg as McpRequest, () => {});
+				} else if (msg.method) {
+					console.warn(
+						`[MCP HTTP /messages] Dropped non-notification method '${msg.method}' sent without id`
+					);
 				}
 			}
 			res.writeHead(202);
@@ -566,6 +574,30 @@ export class McpHttpServer {
 		// background timer that would have to be cleaned up on plugin
 		// unload.
 		this.sweepExpiredSessions();
+
+		// `initialize` MUST be a request — it returns serverInfo and the
+		// negotiated protocolVersion to the caller, which is impossible
+		// without a response id. An idless initialize would also pass
+		// the `methodBearing` check below (creating a useless session
+		// that never gets stamped) — reject it as malformed up front.
+		const idlessInit = messages.find(
+			(m) => m && m.method === "initialize" && m.id === undefined
+		);
+		if (idlessInit) {
+			res.writeHead(400, { "Content-Type": "application/json" });
+			res.end(
+				JSON.stringify({
+					jsonrpc: "2.0",
+					error: {
+						code: -32600,
+						message:
+							"`initialize` must be a request (with id), not a notification",
+					},
+					id: null,
+				})
+			);
+			return;
+		}
 
 		// Reject mixed batches before any dispatch happens. The lifecycle
 		// gate is per-HTTP-request, so a batch like
@@ -776,14 +808,12 @@ export class McpHttpServer {
 					sess.protocolVersion = response.result.protocolVersion;
 				}
 			} else if (isNotification) {
-				// MCP convention: only `notifications/*` methods are
-				// legitimate notifications. Anything else (`tools/call`,
-				// `tools/list`, `prompts/get`, etc.) is a request and
-				// MUST carry an id; receiving it as a notification is
-				// either a buggy client or an attempt to bypass response
-				// observability for a side-effecting call. Drop it
-				// without dispatching.
-				if (msg.method.startsWith("notifications/")) {
+				// Use the shared helper so /mcp and /messages enforce
+				// the same rule: only notifications/* methods are
+				// legitimate notifications. Anything else (tools/call
+				// etc.) without an id is a malformed request and MUST
+				// NOT reach the handler.
+				if (isLegitimateNotification(msg)) {
 					this.config.onMessage(msg as McpRequest, () => {});
 				} else {
 					console.warn(
@@ -915,6 +945,26 @@ export class McpHttpServer {
 			return false;
 		}
 	}
+}
+
+/**
+ * A method-bearing message is a legitimate notification iff:
+ *   - it has no `id`, AND
+ *   - its method starts with `notifications/` (the MCP convention).
+ *
+ * Anything else with a method but no id (e.g. `tools/call`, `tools/list`,
+ * `prompts/get`) is a malformed request — accepting it lets a side-
+ * effecting handler run without a visible response, which is a real
+ * lifecycle/observability bypass. Both /mcp and /messages use this
+ * predicate so the rule applies to every transport.
+ */
+function isLegitimateNotification(msg: any): boolean {
+	return (
+		msg &&
+		typeof msg.method === "string" &&
+		msg.id === undefined &&
+		msg.method.startsWith("notifications/")
+	);
 }
 
 /**

@@ -47,6 +47,56 @@ function fetchOnce(
 }
 
 /**
+ * Open an SSE session and KEEP it alive so the legacy /messages flow
+ * has a valid session id to post against. Returns the session id parsed
+ * from the `endpoint` event plus a `close()` to drop the connection.
+ *
+ * Use this when the test needs to exercise /messages?session_id=X. Use
+ * `openSseAndRead` when you only care about the response headers.
+ */
+function openSseSession(
+	port: number,
+	headers: Record<string, string> = {}
+): Promise<{ sessionId: string; close: () => void }> {
+	return new Promise((resolve, reject) => {
+		const req = http.request(
+			{
+				hostname: "127.0.0.1",
+				port,
+				method: "GET",
+				path: "/sse",
+				headers: { Accept: "text/event-stream", ...headers },
+			},
+			(res) => {
+				if (res.statusCode !== 200) {
+					reject(new Error(`SSE open failed: ${res.statusCode}`));
+					return;
+				}
+				res.setEncoding("utf8");
+				let buf = "";
+				let resolved = false;
+				res.on("data", (chunk) => {
+					buf += chunk;
+					if (resolved) return;
+					const m = buf.match(/data: \/messages\?session_id=([0-9a-f-]+)/);
+					if (m) {
+						resolved = true;
+						resolve({
+							sessionId: m[1],
+							close: () => req.destroy(),
+						});
+					}
+				});
+				res.on("error", reject);
+			}
+		);
+		req.on("error", reject);
+		req.end();
+		setTimeout(() => req.destroy(new Error("sse open timeout")), 3000);
+	});
+}
+
+/**
  * For SSE: open the connection, read a single chunk to confirm the headers,
  * then drop the request. We don't want long-lived streams in tests.
  */
@@ -215,6 +265,97 @@ describe("McpHttpServer auth", () => {
 		it("responds 200 to OPTIONS without requiring auth", async () => {
 			const res = await fetchOnce("OPTIONS", "/messages", port);
 			expect(res.status).toBe(200);
+		});
+	});
+
+	describe("legacy /messages: notification namespace guard", () => {
+		// Codex's exhaustive review pointed out that the namespace guard
+		// for non-`notifications/*` methods sent without an id had been
+		// applied to /mcp but NOT to /messages. The legacy transport had
+		// the exact same bypass shape: a `tools/call` body without an id
+		// was treated as a notification and dispatched to onMessage,
+		// running any side-effecting tool handler. Pin the fix.
+
+		it("does not dispatch `tools/call` sent without id on /messages", async () => {
+			let toolHandlerInvocations = 0;
+			server.stop();
+			server = new McpHttpServer({
+				onMessage: (req, reply) => {
+					if (req.method === "tools/call") {
+						toolHandlerInvocations++;
+					}
+					reply({ result: {} });
+				},
+				authToken: TOKEN,
+			});
+			port = await server.start(0);
+
+			const session = await openSseSession(port, {
+				Authorization: `Bearer ${TOKEN}`,
+			});
+
+			const res = await fetchOnce(
+				"POST",
+				`/messages?session_id=${session.sessionId}`,
+				port,
+				{
+					"Content-Type": "application/json",
+					Authorization: `Bearer ${TOKEN}`,
+				},
+				JSON.stringify({
+					jsonrpc: "2.0",
+					method: "tools/call",
+					params: {
+						name: "create",
+						arguments: { path: "x.md", file_text: "y" },
+					},
+				})
+			);
+			expect(res.status).toBe(202);
+			// The transport accepts the body (notification semantics) but
+			// the namespace guard refuses to dispatch — no tool runs.
+			expect(toolHandlerInvocations).toBe(0);
+
+			session.close();
+		});
+
+		it("still dispatches legitimate `notifications/*` methods on /messages", async () => {
+			// Sanity: the new guard rejects only non-namespaced
+			// notifications. Real notifications still reach the handler.
+			let initializedReceived = false;
+			server.stop();
+			server = new McpHttpServer({
+				onMessage: (req, reply) => {
+					if (req.method === "notifications/initialized") {
+						initializedReceived = true;
+					}
+					reply({ result: {} });
+				},
+				authToken: TOKEN,
+			});
+			port = await server.start(0);
+
+			const session = await openSseSession(port, {
+				Authorization: `Bearer ${TOKEN}`,
+			});
+
+			const res = await fetchOnce(
+				"POST",
+				`/messages?session_id=${session.sessionId}`,
+				port,
+				{
+					"Content-Type": "application/json",
+					Authorization: `Bearer ${TOKEN}`,
+				},
+				JSON.stringify({
+					jsonrpc: "2.0",
+					method: "notifications/initialized",
+				})
+			);
+			expect(res.status).toBe(202);
+			expect(initializedReceived).toBe(true);
+
+			session.close();
 		});
 	});
 });
@@ -618,6 +759,27 @@ describe("McpHttpServer Streamable HTTP (/mcp)", () => {
 				{ jsonrpc: "2.0", id: 2, method: "initialize", params: {} },
 			]);
 			expect(res.status).toBe(400);
+		});
+
+		it("rejects an `initialize` message sent without id (notification form)", async () => {
+			// initialize MUST be a request — it returns serverInfo and
+			// the negotiated protocolVersion to the caller, and that
+			// requires an id to correlate the response. Pre-fix, the
+			// methodBearing check would treat this as an "initialize
+			// batch" and mint a session, but the message would then drop
+			// out of the dispatch loop because it didn't match the
+			// `notifications/*` namespace — leaving an unusable session
+			// in memory until the idle sweep.
+			const res = await postMcp({
+				jsonrpc: "2.0",
+				method: "initialize",
+				params: {},
+			});
+			expect(res.status).toBe(400);
+			const err = JSON.parse(res.body);
+			expect(err.error?.message).toMatch(/must be a request/i);
+			// And critically, no Mcp-Session-Id should have been minted.
+			expect(res.headers["mcp-session-id"]).toBeUndefined();
 		});
 
 		it("rejects multiple initialize requests in one batch", async () => {
