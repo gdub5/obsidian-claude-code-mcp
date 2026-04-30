@@ -574,11 +574,19 @@ export class McpHttpServer {
 		// to stamp protocolVersion on the session — even when initialize
 		// errored. Rejecting at the boundary keeps the gate impossible to
 		// sidestep.
-		const requests = messages.filter(
-			(m) => m && m.id !== undefined && typeof m.method === "string"
+		//
+		// Critical: count ALL method-bearing messages, not just id-bearing
+		// requests. A `tools/call` sent as a notification (no id) still
+		// runs the tool handler — including any mutating side effect —
+		// and would slip past an id-only check. Notifications get the
+		// same gate treatment as requests in this batch shape.
+		const methodBearing = messages.filter(
+			(m) => m && typeof m.method === "string"
 		);
-		const initRequests = requests.filter((m) => m.method === "initialize");
-		if (initRequests.length > 1) {
+		const initMessages = methodBearing.filter(
+			(m) => m.method === "initialize"
+		);
+		if (initMessages.length > 1) {
 			res.writeHead(400, { "Content-Type": "application/json" });
 			res.end(
 				JSON.stringify({
@@ -593,7 +601,7 @@ export class McpHttpServer {
 			);
 			return;
 		}
-		if (initRequests.length === 1 && requests.length > 1) {
+		if (initMessages.length === 1 && methodBearing.length > 1) {
 			res.writeHead(400, { "Content-Type": "application/json" });
 			res.end(
 				JSON.stringify({
@@ -601,7 +609,7 @@ export class McpHttpServer {
 					error: {
 						code: -32600,
 						message:
-							"Cannot mix `initialize` with other requests in a single batch — initialize must complete first",
+							"Cannot mix `initialize` with other messages (requests or notifications) in a single batch — initialize must complete first",
 					},
 					id: null,
 				})
@@ -610,7 +618,7 @@ export class McpHttpServer {
 		}
 
 		const sessionHeader = (req.headers["mcp-session-id"] as string) || null;
-		const isInitializeBatch = initRequests.length === 1;
+		const isInitializeBatch = initMessages.length === 1;
 
 		// Session validation
 		// - On initialize: client sends NO session id; we mint one.
@@ -768,8 +776,20 @@ export class McpHttpServer {
 					sess.protocolVersion = response.result.protocolVersion;
 				}
 			} else if (isNotification) {
-				// Fire-and-forget — handlers ignore the no-op reply.
-				this.config.onMessage(msg as McpRequest, () => {});
+				// MCP convention: only `notifications/*` methods are
+				// legitimate notifications. Anything else (`tools/call`,
+				// `tools/list`, `prompts/get`, etc.) is a request and
+				// MUST carry an id; receiving it as a notification is
+				// either a buggy client or an attempt to bypass response
+				// observability for a side-effecting call. Drop it
+				// without dispatching.
+				if (msg.method.startsWith("notifications/")) {
+					this.config.onMessage(msg as McpRequest, () => {});
+				} else {
+					console.warn(
+						`[MCP HTTP] Dropped non-notification method '${msg.method}' sent without id`
+					);
+				}
 			}
 			// Anything else (orphan response, malformed) is silently dropped.
 		}

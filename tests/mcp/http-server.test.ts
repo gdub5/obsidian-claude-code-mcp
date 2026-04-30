@@ -630,6 +630,148 @@ describe("McpHttpServer Streamable HTTP (/mcp)", () => {
 			expect(err.error?.message).toMatch(/Multiple initialize/i);
 		});
 
+		it("rejects [initialize, tools/call-as-notification] (notification-via-id-omission bypass)", async () => {
+			// The original mixed-batch guard counted only id-bearing
+			// requests. tools/call without an id would slip through, but
+			// the dispatcher would still invoke the tool handler — a real
+			// lifecycle bypass for any side-effecting tool. Codex's
+			// fifth pass found this; this regression test pins the fix.
+			//
+			// We use a server with a tracked stub so we can assert the
+			// tool handler was never called.
+			let toolHandlerInvocations = 0;
+			server.stop();
+			server = new McpHttpServer({
+				onMessage: (req, reply) => {
+					if (req.method === "initialize") {
+						reply({
+							result: {
+								protocolVersion: "2024-11-05",
+								capabilities: { tools: {} },
+								serverInfo: { name: "test", version: "0" },
+							},
+						});
+					} else if (req.method === "tools/call") {
+						toolHandlerInvocations++;
+						reply({ result: { content: [] } });
+					} else {
+						reply({ result: {} });
+					}
+				},
+				authToken: TOKEN,
+			});
+			port = await server.start(0);
+
+			const res = await postMcp([
+				{ jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+				{
+					// no id → notification. Without the fix, this slipped
+					// through the batch check and the handler ran.
+					jsonrpc: "2.0",
+					method: "tools/call",
+					params: { name: "create", arguments: { path: "x.md", file_text: "y" } },
+				},
+			]);
+			expect(res.status).toBe(400);
+			// And critically, the tool handler must NOT have been invoked
+			// even though the batch was rejected at parse time.
+			expect(toolHandlerInvocations).toBe(0);
+		});
+
+		it("drops a single non-notification method sent without id (e.g. tools/call without id)", async () => {
+			// Even outside an initialize batch, sending `tools/call` as
+			// a notification shouldn't dispatch the handler — that
+			// pattern bypasses normal request/response observability and
+			// has no legitimate use.
+			let toolHandlerInvocations = 0;
+			server.stop();
+			server = new McpHttpServer({
+				onMessage: (req, reply) => {
+					if (req.method === "initialize") {
+						reply({
+							result: {
+								protocolVersion: "2024-11-05",
+								capabilities: { tools: {} },
+								serverInfo: { name: "test", version: "0" },
+							},
+						});
+					} else if (req.method === "tools/call") {
+						toolHandlerInvocations++;
+						reply({ result: { content: [] } });
+					} else {
+						reply({ result: {} });
+					}
+				},
+				authToken: TOKEN,
+			});
+			port = await server.start(0);
+
+			// Establish a valid session first
+			const init = await postMcp({
+				jsonrpc: "2.0",
+				id: 1,
+				method: "initialize",
+				params: {},
+			});
+			const sid = init.headers["mcp-session-id"] as string;
+
+			// Send tools/call without an id
+			const res = await postMcp(
+				{
+					jsonrpc: "2.0",
+					method: "tools/call",
+					params: { name: "create", arguments: { path: "x.md", file_text: "y" } },
+				},
+				{ "Mcp-Session-Id": sid }
+			);
+			// The transport accepts notifications with 202; the message
+			// just gets dropped silently before reaching the handler.
+			expect(res.status).toBe(202);
+			expect(toolHandlerInvocations).toBe(0);
+		});
+
+		it("still allows real notifications (notifications/initialized) on a valid session", async () => {
+			// Sanity: the new dispatch filter targets non-notifications/*
+			// methods; legitimate notifications must still get through.
+			let initializedNotifReceived = false;
+			server.stop();
+			server = new McpHttpServer({
+				onMessage: (req, reply) => {
+					if (req.method === "initialize") {
+						reply({
+							result: {
+								protocolVersion: "2024-11-05",
+								capabilities: { tools: {} },
+								serverInfo: { name: "test", version: "0" },
+							},
+						});
+					} else if (req.method === "notifications/initialized") {
+						initializedNotifReceived = true;
+						reply({ result: {} });
+					} else {
+						reply({ result: {} });
+					}
+				},
+				authToken: TOKEN,
+			});
+			port = await server.start(0);
+
+			const init = await postMcp({
+				jsonrpc: "2.0",
+				id: 1,
+				method: "initialize",
+				params: {},
+			});
+			const sid = init.headers["mcp-session-id"] as string;
+
+			const res = await postMcp(
+				{ jsonrpc: "2.0", method: "notifications/initialized" },
+				{ "Mcp-Session-Id": sid }
+			);
+			expect(res.status).toBe(202);
+			expect(initializedNotifReceived).toBe(true);
+		});
+
 		it("allows a batch of multiple non-initialize requests on a valid session", async () => {
 			// Sanity: the rejection is specifically for batches *containing
 			// initialize alongside other requests*. A batch of pure

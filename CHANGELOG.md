@@ -64,12 +64,20 @@ this is purely additive.
   a session via a failed handshake and continue using it. Caught by
   the third adversarial pass.
 - **Mixed-batch rejection.** A JSON-RPC batch containing `initialize`
-  *and* any other request is rejected with `400` before any dispatch.
-  Otherwise the lifecycle gate (request-level) could be bypassed by
-  inlining a tool call alongside initialize — both would dispatch
-  before the session was authorized. Caught by the fourth adversarial
-  pass; covered by tests for the three permutations
-  (`[init, tool]`, `[tool, init]`, `[init, init]`).
+  *and* any other method-bearing message (request OR notification) is
+  rejected with `400` before any dispatch. Otherwise the lifecycle
+  gate (request-level) could be bypassed by inlining a tool call
+  alongside initialize — both would dispatch before the session was
+  authorized. The fifth adversarial pass tightened this further: the
+  initial mixed-batch check counted only id-bearing requests, leaving
+  side-effecting tool calls sent as notifications (no id) able to slip
+  through; counting all method-bearing messages closes that gap.
+- **Notifications-namespace guard.** Even outside batches, a
+  notification (no id) is dispatched only if its method begins with
+  `notifications/`. A bare `tools/call` or `tools/list` sent without
+  an id no longer fires the handler — that pattern has no legitimate
+  use and would otherwise let a side-effecting tool run without a
+  visible response in the request/response stream.
 - **Integration harness fixed and tightened.** Auto-injects
   `MCP-Protocol-Version` on post-init `/mcp` calls; exits non-zero on
   any warning so a regression in the live test vault produces a real
@@ -99,7 +107,7 @@ this is purely additive.
   [init, init], and a sanity test that batches of multiple non-init
   requests still work). Time-based tests use `vi.setSystemTime` so
   they're deterministic.
-- Total tests now **159** (was 130 in v1.1.10).
+- Total tests now **162** (was 130 in v1.1.10).
 
 ## v1.1.10 — 2026-04-30 (PR B: MetadataCache integration)
 
