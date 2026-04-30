@@ -26,9 +26,11 @@ about links, tags, and frontmatter without manually re-parsing notes.
 
 ### `search_vault` safeguards (post-Codex-review hardening)
 
-The first cut of `search_vault` was structurally unbounded — a Codex
-adversarial review correctly flagged it as a host-freeze risk on real-
-sized vaults. Six limits now apply:
+The first cut of `search_vault` was structurally unbounded. Three
+successive Codex adversarial passes each caught a real issue that
+self-review missed; all three fixes are folded in here.
+
+Six limits now apply:
 
 1. **`max_results` is clamped** to a hard ceiling of 200 regardless of
    what the caller asks for. Default stays 50.
@@ -50,6 +52,13 @@ sized vaults. Six limits now apply:
    all files in a single call. Defense in depth against a vault full of
    just-under-1 MB markdown files (5,000 such files would otherwise
    stream ~5 GB through the loop before the file-count cap tripped).
+   Counted in **actual UTF-8 bytes** (`stat.size` when available, falling
+   back to `Buffer.byteLength(content, 'utf8')`) rather than UTF-16 code
+   units — without this, a CJK or emoji-heavy vault would have blown
+   past the advertised cap by 2-3x because `string.length` undercounts
+   multibyte content. Includes a pre-read short-circuit using `stat.size`
+   so we can halt before paying the cost of `cachedRead` on the file
+   that would tip us over.
 
 No wall-clock budget. Time-based limits introduce CI flakiness and
 depend on system load; counting work directly is deterministic.
@@ -58,11 +67,12 @@ Switched from `vault.adapter.read(path)` to `vault.cachedRead(file)` —
 the canonical read-only API; uses Obsidian's in-memory buffer when the
 file is open.
 
-Seven new unit tests pin each safeguard: hard-cap clamping, file-size
+Eight new unit tests pin each safeguard: hard-cap clamping, file-size
 skip, non-markdown filter, byte-budget truncation, files-scanned scan
-budget, bytes-scanned scan budget, and a regression guard that small
-no-match queries still produce clean "no matches" output (not a false
-"search incomplete" notice).
+budget, bytes-scanned scan budget, multibyte-content byte accounting
+(CJK content trips the cap based on real bytes, not code units), and a
+regression guard that small no-match queries still produce clean "no
+matches" output (not a false "search incomplete" notice).
 
 Total tool count is now **13** (was 7). All metadata tools are registered
 to both transports (WS + HTTP).

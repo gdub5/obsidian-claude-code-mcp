@@ -486,6 +486,31 @@ describe("search_vault", () => {
 		expect(text).toContain("files scanned");
 	});
 
+	it("counts UTF-8 bytes (not UTF-16 code units) toward the bytes-scanned budget", async () => {
+		// CJK content is 3 UTF-8 bytes per char but 1 UTF-16 code unit.
+		// Pre-fix, bytesScanned was incremented by content.length, which
+		// undercounts multibyte content 3x — a vault of CJK notes blew
+		// well past the advertised 50MB cap before tripping. This test
+		// ensures the counter uses real bytes (stat.size or
+		// Buffer.byteLength), not code units.
+		const { vault, handlers } = setup();
+		// "中".repeat(333_000) → 333,000 code units, ~999,000 UTF-8 bytes.
+		// Just under the 1MB per-file cap. 60 such files = ~60MB UTF-8,
+		// which trips the 50MB byte budget. Under the buggy implementation
+		// 60 × 333_000 = ~20MB code units → no trip.
+		const multibyte = "中".repeat(333_000);
+		for (let i = 0; i < 60; i++) {
+			vault.__seed(`mb-${i}.md`, multibyte);
+		}
+
+		const { reply, calls } = makeReply();
+		await handlers.get("search_vault")!.handler({ query: "needle" }, reply);
+
+		const text = textOf(calls[0]);
+		expect(text).toMatch(/scan budget hit|search incomplete/i);
+		expect(text).toContain("MB read");
+	});
+
 	it("stops scanning when the cumulative bytes-scanned budget trips", async () => {
 		// Files just under the per-file 1MB cap — enough of them to push
 		// cumulative bytes-scanned past the 50MB cap. Tests that the bytes

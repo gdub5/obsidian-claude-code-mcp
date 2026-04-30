@@ -438,11 +438,20 @@ export class MetadataTools {
 								break;
 							}
 
-							// Skip files larger than the per-file byte budget.
-							// `stat.size` is set by Obsidian and our mock; treat
+							// `stat.size` is the on-disk byte count. Treat
 							// missing as 0 (don't penalize unknown-size files).
 							const size = (file as any).stat?.size ?? 0;
+
+							// Skip files larger than the per-file byte budget.
 							if (size > SEARCH_MAX_FILE_BYTES) continue;
+
+							// Pre-read budget check. Better to halt before the
+							// expensive read than after, especially when stat
+							// is reliable (the Obsidian common case).
+							if (size > 0 && bytesScanned + size > SEARCH_MAX_BYTES_SCANNED) {
+								truncatedByScanBudget = "bytes";
+								break;
+							}
 
 							let content: string;
 							try {
@@ -460,14 +469,27 @@ export class MetadataTools {
 							}
 
 							// Defense in depth: even if stat lied, don't process
-							// huge content.
+							// huge content. content.length is UTF-16 units, so
+							// this comparison is conservative for multibyte
+							// content (1MB code units ≥ 1MB bytes), which is
+							// the safe direction.
 							if (content.length > SEARCH_MAX_FILE_BYTES) {
 								filesScanned++;
 								continue;
 							}
 
 							filesScanned++;
-							bytesScanned += content.length;
+
+							// Account for actual UTF-8 bytes, not UTF-16 code
+							// units. content.length undercounts CJK/emoji
+							// content by 2-3x — a vault of multibyte notes
+							// would otherwise blow past the advertised 50MB
+							// budget while bytesScanned was still reading low.
+							// Prefer stat.size (the canonical on-disk value);
+							// fall back to Buffer.byteLength when stat is
+							// missing or unreliable, taking the max either way.
+							const utf8Bytes = Buffer.byteLength(content, "utf8");
+							bytesScanned += Math.max(size, utf8Bytes);
 
 							const lines = content.split("\n");
 							for (let i = 0; i < lines.length; i++) {
