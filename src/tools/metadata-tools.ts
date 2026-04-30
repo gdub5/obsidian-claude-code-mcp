@@ -4,6 +4,22 @@ import { ToolDefinition, ToolImplementation } from "../shared/tool-registry";
 import { normalizePath } from "../obsidian/utils";
 
 // ──────────────────────────────────────────────────────────────────────
+// search_vault safeguards
+//
+// Picked to keep one tool call from monopolizing Obsidian on a real
+// (50k-note) vault. All four limits are independent — any one tripping
+// stops the search early.
+
+/** Hard ceiling on `max_results`, regardless of caller request. */
+const SEARCH_MAX_RESULTS_HARD_CAP = 200;
+/** Default when caller doesn't specify. */
+const SEARCH_DEFAULT_RESULTS = 50;
+/** Skip files larger than this. 1 MB excludes huge logs / dumps. */
+const SEARCH_MAX_FILE_BYTES = 1_000_000;
+/** Total budget for snippet bytes in the response, before MCP framing. */
+const SEARCH_MAX_RESPONSE_BYTES = 256 * 1024;
+
+// ──────────────────────────────────────────────────────────────────────
 // Tool definitions
 //
 // All metadata tools sit under category "workspace" — they operate on
@@ -356,35 +372,94 @@ export class MetadataTools {
 								},
 							});
 						}
-						const cap = typeof max_results === "number" && max_results > 0
-							? max_results
-							: 50;
+						// ── safeguards (PR B hardening) ──────────────────────
+						// Codex review flagged the original implementation as
+						// able to freeze the host on a real vault: unbounded
+						// max_results, scans every file (including binaries),
+						// reads whole content, builds one big response. The
+						// four limits below address that.
+						const cap = Math.min(
+							typeof max_results === "number" && max_results > 0
+								? max_results
+								: SEARCH_DEFAULT_RESULTS,
+							SEARCH_MAX_RESULTS_HARD_CAP
+						);
 						const cmp = case_sensitive ? query : query.toLowerCase();
 
 						const hits: Array<{ path: string; line: number; snippet: string }> = [];
-						for (const file of this.app.vault.getFiles()) {
+						let bytesUsed = 0;
+						let truncatedByBudget = false;
+
+						// Markdown-only — skip PDFs / images / audio / canvas etc.
+						// Falls back to getFiles() if the API is missing (older
+						// Obsidian or partial mocks).
+						const files =
+							typeof (this.app.vault as any).getMarkdownFiles === "function"
+								? (this.app.vault as any).getMarkdownFiles()
+								: this.app.vault.getFiles().filter((f: any) => f.extension === "md");
+
+						outer: for (const file of files) {
 							if (hits.length >= cap) break;
+
+							// Skip files larger than the per-file byte budget.
+							// `stat.size` is set by Obsidian and our mock; treat
+							// missing as 0 (don't penalize unknown-size files).
+							const size = (file as any).stat?.size ?? 0;
+							if (size > SEARCH_MAX_FILE_BYTES) continue;
+
 							let content: string;
 							try {
-								content = await this.app.vault.adapter.read(file.path);
-							} catch {
-								continue; // unreadable file (e.g. binary) — skip
-							}
-							const lines = content.split("\n");
-							for (let i = 0; i < lines.length && hits.length < cap; i++) {
-								const haystack = case_sensitive ? lines[i] : lines[i].toLowerCase();
-								if (haystack.includes(cmp)) {
-									hits.push({
-										path: file.path,
-										line: i + 1,
-										snippet: trimSnippet(lines[i]),
-									});
+								// Prefer cachedRead — it's the canonical
+								// "I'm only reading" API and uses Obsidian's
+								// in-memory buffer when the file is already open.
+								if (typeof (this.app.vault as any).cachedRead === "function") {
+									content = await (this.app.vault as any).cachedRead(file);
+								} else {
+									content = await this.app.vault.adapter.read(file.path);
 								}
+							} catch {
+								continue; // unreadable — skip
+							}
+
+							// Defense in depth: even if stat lied, don't process
+							// huge content.
+							if (content.length > SEARCH_MAX_FILE_BYTES) continue;
+
+							const lines = content.split("\n");
+							for (let i = 0; i < lines.length; i++) {
+								if (hits.length >= cap) break outer;
+								const haystack = case_sensitive
+									? lines[i]
+									: lines[i].toLowerCase();
+								if (!haystack.includes(cmp)) continue;
+
+								const snippet = trimSnippet(lines[i]);
+								// Approximate the bytes this hit will contribute
+								// to the response (path + line + snippet + " : ").
+								const approxLineBytes =
+									snippet.length + file.path.length + 16;
+								if (bytesUsed + approxLineBytes > SEARCH_MAX_RESPONSE_BYTES) {
+									truncatedByBudget = true;
+									break outer;
+								}
+								hits.push({
+									path: file.path,
+									line: i + 1,
+									snippet,
+								});
+								bytesUsed += approxLineBytes;
 							}
 						}
 
+						const cappedByCount = hits.length >= cap;
+						const truncationNote = truncatedByBudget
+							? `, truncated at ${SEARCH_MAX_RESPONSE_BYTES} byte response budget`
+							: cappedByCount
+								? `, capped at ${cap} results`
+								: "";
+
 						const text = hits.length
-							? `Search results for "${query}" (${hits.length}${hits.length >= cap ? `, capped at ${cap}` : ""}):\n` +
+							? `Search results for "${query}" (${hits.length}${truncationNote}):\n` +
 								hits
 									.map((h) => `${h.path}:${h.line}: ${h.snippet}`)
 									.join("\n")

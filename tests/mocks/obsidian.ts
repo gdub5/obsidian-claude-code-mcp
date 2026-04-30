@@ -5,18 +5,31 @@
  * to keep imports working in tests; tests should not exercise UI.
  */
 
+export interface FileStats {
+	ctime: number;
+	mtime: number;
+	size: number;
+}
+
 export class TFile {
 	path: string;
 	name: string;
 	basename: string;
 	extension: string;
-	constructor(path: string) {
+	stat: FileStats;
+	constructor(path: string, stat?: Partial<FileStats>) {
 		this.path = path;
 		const segs = path.split("/");
 		this.name = segs[segs.length - 1] ?? path;
 		const dot = this.name.lastIndexOf(".");
 		this.basename = dot >= 0 ? this.name.slice(0, dot) : this.name;
 		this.extension = dot >= 0 ? this.name.slice(dot + 1) : "";
+		const now = Date.now();
+		this.stat = {
+			ctime: stat?.ctime ?? now,
+			mtime: stat?.mtime ?? now,
+			size: stat?.size ?? 0,
+		};
 	}
 }
 
@@ -36,6 +49,7 @@ export interface VaultAdapter {
 export class Vault {
 	private files = new Map<string, string>();
 	private folders = new Set<string>();
+	private stats = new Map<string, FileStats>();
 	adapter: VaultAdapter;
 	private name: string;
 
@@ -65,7 +79,28 @@ export class Vault {
 	}
 
 	getFiles(): TFile[] {
-		return Array.from(this.files.keys()).map((p) => new TFile(p));
+		return Array.from(this.files.keys()).map(
+			(p) => new TFile(p, this.stats.get(p))
+		);
+	}
+
+	/**
+	 * Mirrors `app.vault.getMarkdownFiles()` — only `.md` files. The hardened
+	 * search_vault uses this to skip binaries (PDFs, images, etc.).
+	 */
+	getMarkdownFiles(): TFile[] {
+		return this.getFiles().filter((f) => f.extension === "md");
+	}
+
+	/**
+	 * Mirrors `app.vault.cachedRead(file)`. In real Obsidian this prefers an
+	 * in-memory buffer if the file is open; the mock just returns content.
+	 */
+	async cachedRead(file: TFile): Promise<string> {
+		if (!this.files.has(file.path)) {
+			throw new Error(`ENOENT: ${file.path}`);
+		}
+		return this.files.get(file.path)!;
 	}
 
 	/**
@@ -114,12 +149,21 @@ export class Vault {
 
 	/**
 	 * Seed a file at `path` with `content`. Auto-creates ancestor folders
-	 * so test setup doesn't have to chain calls.
+	 * so test setup doesn't have to chain calls. Optionally override the
+	 * file stat — useful for testing size-based skip logic.
 	 */
-	__seed(path: string, content: string): void {
+	__seed(path: string, content: string, statOverride?: Partial<FileStats>): void {
 		const parent = parentOf(path);
 		if (parent) this.__ensureFolder(parent);
 		this.files.set(path, content);
+		const now = Date.now();
+		this.stats.set(path, {
+			ctime: statOverride?.ctime ?? now,
+			mtime: statOverride?.mtime ?? now,
+			// Default size to actual byte length; tests can override to
+			// claim a tiny file is huge (avoids needing real megabyte buffers).
+			size: statOverride?.size ?? Buffer.byteLength(content, "utf8"),
+		});
 	}
 
 	__ensureFolder(path: string): void {

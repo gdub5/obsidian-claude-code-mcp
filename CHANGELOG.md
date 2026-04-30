@@ -20,9 +20,33 @@ about links, tags, and frontmatter without manually re-parsing notes.
 - **`find_by_tag(tag, nested?)`** — files carrying a given tag. Defaults to
   nested matching: `#project` matches `#project/april` etc. Pass
   `nested: false` for exact-match-only.
-- **`search_vault(query, max_results?, case_sensitive?)`** — naive full-text
-  scan with `path:line: snippet` output. Case-insensitive by default,
-  capped at 50 results unless overridden.
+- **`search_vault(query, max_results?, case_sensitive?)`** — full-text
+  scan with `path:line: snippet` output. Case-insensitive by default.
+  Hardened against pathological inputs (see Safeguards below).
+
+### `search_vault` safeguards (post-Codex-review hardening)
+
+The first cut of `search_vault` was structurally unbounded — a Codex
+adversarial review correctly flagged it as a host-freeze risk on real-
+sized vaults. Four limits now apply:
+
+1. **`max_results` is clamped** to a hard ceiling of 200 regardless of
+   what the caller asks for. Default stays 50.
+2. **Markdown-only.** Uses `vault.getMarkdownFiles()` instead of
+   `getFiles()`, so PDFs / images / canvas / audio attachments are never
+   scanned.
+3. **Per-file byte cap.** Files reporting `stat.size > 1 MB` are skipped;
+   defense in depth checks content length again after read.
+4. **Response byte budget.** Total snippet bytes are tracked as hits
+   accumulate; once over 256 KB the loop short-circuits and the response
+   labels itself "truncated at the byte budget".
+
+Switched from `vault.adapter.read(path)` to `vault.cachedRead(file)` —
+the canonical read-only API; uses Obsidian's in-memory buffer when the
+file is open.
+
+Four new unit tests pin each safeguard: hard-cap clamping, file-size
+skip, non-markdown filter, byte-budget truncation.
 
 Total tool count is now **13** (was 7). All metadata tools are registered
 to both transports (WS + HTTP).

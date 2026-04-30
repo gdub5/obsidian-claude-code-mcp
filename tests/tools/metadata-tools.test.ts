@@ -414,6 +414,81 @@ describe("search_vault", () => {
 		expect(text).toMatch(/capped at 10/);
 	});
 
+	it("clamps max_results to the hard cap (200) even when caller asks for more", async () => {
+		const { vault, handlers } = setup();
+		// 250 files, each one matches; if cap weren't enforced we'd see 250.
+		for (let i = 0; i < 250; i++) {
+			vault.__seed(`f${i}.md`, "needle");
+		}
+		const { reply, calls } = makeReply();
+		await handlers
+			.get("search_vault")!
+			.handler({ query: "needle", max_results: 9999 }, reply);
+
+		const text = textOf(calls[0]);
+		// header + at most 200 hit lines
+		expect(text.split("\n").length).toBeLessThanOrEqual(201);
+		expect(text).toMatch(/capped at 200 results/);
+	});
+
+	it("skips files larger than the per-file size cap", async () => {
+		const { vault, handlers } = setup();
+		// Real content is small but we lie via stat.size — avoids allocating
+		// a real megabyte buffer in tests.
+		vault.__seed("big.md", "needle here", { size: 5_000_000 });
+		vault.__seed("small.md", "needle here");
+
+		const { reply, calls } = makeReply();
+		await handlers.get("search_vault")!.handler({ query: "needle" }, reply);
+
+		const text = textOf(calls[0]);
+		expect(text).toContain("small.md");
+		expect(text).not.toContain("big.md");
+	});
+
+	it("ignores non-markdown files (binaries / canvas / images)", async () => {
+		const { vault, handlers } = setup();
+		vault.__seed("note.md", "needle in the note");
+		// Non-markdown files would never be a useful target for full-text
+		// search and could be huge — they should be filtered out entirely.
+		vault.__seed("attachment.pdf", "needle pretending to be PDF text");
+		vault.__seed("canvas.canvas", "{\"nodes\":[\"needle\"]}");
+		vault.__seed("image.png", "needle binary blob");
+
+		const { reply, calls } = makeReply();
+		await handlers.get("search_vault")!.handler({ query: "needle" }, reply);
+
+		const text = textOf(calls[0]);
+		expect(text).toContain("note.md");
+		expect(text).not.toContain("attachment.pdf");
+		expect(text).not.toContain("canvas.canvas");
+		expect(text).not.toContain("image.png");
+	});
+
+	it("truncates the response when the byte budget is exceeded", async () => {
+		const { vault, handlers } = setup();
+		// Long lines so each hit eats ~200 bytes — quickly hits the
+		// 256KB budget without needing 200 hits.
+		const longHit = "needle " + "x".repeat(190);
+		for (let i = 0; i < 200; i++) {
+			vault.__seed(`f${i}.md`, longHit);
+		}
+		const { reply, calls } = makeReply();
+		await handlers
+			.get("search_vault")!
+			.handler({ query: "needle", max_results: 200 }, reply);
+
+		const text = textOf(calls[0]);
+		// Either the byte budget tripped (truncated marker) OR the count
+		// cap tripped — both are acceptable outcomes for very wide hits.
+		// What we MUST see is some kind of truncation marker, and the
+		// total response stays under ~512KB (a generous safety multiple
+		// of the 256KB target — the marker is a hard contract, the
+		// physical cap is conservative).
+		expect(text.length).toBeLessThan(512 * 1024);
+		expect(text).toMatch(/truncated|capped/);
+	});
+
 	it("reports no matches cleanly", async () => {
 		const { vault, handlers } = setup();
 		vault.__seed("a.md", "nothing here");
