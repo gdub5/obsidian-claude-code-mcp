@@ -12,8 +12,40 @@ interface HttpReplyFunction {
 interface Session {
 	id: string;
 	createdAt: number;
+	/**
+	 * Last time we accepted any request bound to this session. Updated on
+	 * every authenticated /mcp POST that touches the session and on every
+	 * SSE message dispatch. Used to expire idle Streamable-HTTP sessions
+	 * that would otherwise live forever (HTTP is request/response — there's
+	 * no socket close to hook for cleanup).
+	 */
+	lastActivityAt: number;
+	/**
+	 * Negotiated MCP protocol version, captured from the `initialize` reply.
+	 * Subsequent requests on the same session must send a matching
+	 * `MCP-Protocol-Version` header. Null until initialize completes.
+	 */
+	protocolVersion: string | null;
 	streams: Set<http.ServerResponse>;
 }
+
+/**
+ * Streamable-HTTP sessions don't ride a long-lived socket, so we sweep
+ * idle ones manually. 30 minutes covers a sleeping laptop / paused agent
+ * comfortably without leaking authorized session ids forever.
+ */
+const MCP_SESSION_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+
+/**
+ * Versions the server actually implements. Clients sending a different
+ * version on a post-initialize request are rejected before we dispatch.
+ * Server can still accept the version requested in `initialize` (the
+ * handler picks one to advertise back); this set guards subsequent
+ * requests against version-skew bugs.
+ */
+const SUPPORTED_MCP_PROTOCOL_VERSIONS: ReadonlySet<string> = new Set([
+	"2024-11-05",
+]);
 
 interface SSEStream {
 	response: http.ServerResponse;
@@ -89,7 +121,33 @@ export class McpHttpServer {
 	}
 
 	get clientCount(): number {
-		return this.activeStreams.size;
+		// Sum SSE streams (legacy /sse + /messages clients) and bare
+		// sessions (Streamable-HTTP /mcp clients). A session may be in
+		// `sessions` and ALSO have streams attached (legacy path) — count
+		// it once via the streams collection.
+		const sseClients = this.activeStreams.size;
+		let mcpClients = 0;
+		for (const sess of this.sessions.values()) {
+			if (sess.streams.size === 0) mcpClients++;
+		}
+		return sseClients + mcpClients;
+	}
+
+	/**
+	 * Drop sessions that haven't been touched in
+	 * `MCP_SESSION_IDLE_TIMEOUT_MS`. Called from the request hot path so
+	 * we don't need a background timer. SSE-attached sessions are skipped
+	 * — the underlying socket gives us a real close hook for those.
+	 */
+	private sweepExpiredSessions(): void {
+		const cutoff = Date.now() - MCP_SESSION_IDLE_TIMEOUT_MS;
+		for (const [id, sess] of this.sessions) {
+			if (sess.streams.size > 0) continue; // managed by the SSE close hook
+			if (sess.lastActivityAt < cutoff) {
+				this.sessions.delete(id);
+				this.config.onDisconnection?.();
+			}
+		}
 	}
 
 	get serverPort(): number {
@@ -279,9 +337,12 @@ export class McpHttpServer {
 
 		// Create new session
 		const sessionId = crypto.randomUUID();
+		const now = Date.now();
 		const session: Session = {
 			id: sessionId,
-			createdAt: Date.now(),
+			createdAt: now,
+			lastActivityAt: now,
+			protocolVersion: null,
 			streams: new Set([res]),
 		};
 		this.sessions.set(sessionId, session);
@@ -500,6 +561,12 @@ export class McpHttpServer {
 			return;
 		}
 
+		// Sweep expired sessions before we look any up. Cheap (linear in
+		// active session count, typically < 5) and avoids needing a
+		// background timer that would have to be cleaned up on plugin
+		// unload.
+		this.sweepExpiredSessions();
+
 		const sessionHeader = (req.headers["mcp-session-id"] as string) || null;
 		const isInitializeBatch = messages.some(
 			(m) => m && m.method === "initialize" && m.id !== undefined
@@ -511,6 +578,7 @@ export class McpHttpServer {
 		//   gave them. Reject with 404 if missing or unknown — matches
 		//   the spec's "session not found" semantics.
 		let sessionId: string;
+		const now = Date.now();
 		if (isInitializeBatch) {
 			sessionId = sessionHeader && this.sessions.has(sessionHeader)
 				? sessionHeader
@@ -518,7 +586,9 @@ export class McpHttpServer {
 			if (!this.sessions.has(sessionId)) {
 				this.sessions.set(sessionId, {
 					id: sessionId,
-					createdAt: Date.now(),
+					createdAt: now,
+					lastActivityAt: now,
+					protocolVersion: null,
 					streams: new Set(),
 				});
 				this.config.onConnection?.();
@@ -554,7 +624,52 @@ export class McpHttpServer {
 				return;
 			}
 			sessionId = sessionHeader;
+
+			// Spec requires every post-initialize request to carry
+			// `MCP-Protocol-Version`. We enforce it strictly: missing or
+			// unsupported → 400. This catches version-skew bugs where a
+			// client successfully initialized but then fails to advertise
+			// the version on subsequent calls.
+			const versionHeader = req.headers["mcp-protocol-version"];
+			const presentedVersion = Array.isArray(versionHeader)
+				? versionHeader[0]
+				: versionHeader;
+			if (!presentedVersion) {
+				res.writeHead(400, { "Content-Type": "application/json" });
+				res.end(
+					JSON.stringify({
+						jsonrpc: "2.0",
+						error: {
+							code: -32600,
+							message:
+								"Missing MCP-Protocol-Version header (required after initialize)",
+						},
+						id: null,
+					})
+				);
+				return;
+			}
+			if (!SUPPORTED_MCP_PROTOCOL_VERSIONS.has(presentedVersion)) {
+				res.writeHead(400, { "Content-Type": "application/json" });
+				res.end(
+					JSON.stringify({
+						jsonrpc: "2.0",
+						error: {
+							code: -32600,
+							message: `Unsupported MCP-Protocol-Version: ${presentedVersion}. Server supports: ${[
+								...SUPPORTED_MCP_PROTOCOL_VERSIONS,
+							].join(", ")}`,
+						},
+						id: null,
+					})
+				);
+				return;
+			}
 		}
+
+		// Touch the session — every accepted request resets the idle clock.
+		const sess = this.sessions.get(sessionId)!;
+		sess.lastActivityAt = now;
 
 		// Dispatch each message. For requests, collect the response;
 		// for notifications, fire-and-forget.
@@ -570,6 +685,13 @@ export class McpHttpServer {
 					this.config.onMessage
 				);
 				responses.push(response);
+
+				// Capture the negotiated protocol version off the
+				// initialize response so we can validate the header
+				// the client must send on every subsequent request.
+				if (msg.method === "initialize" && response.result?.protocolVersion) {
+					sess.protocolVersion = response.result.protocolVersion;
+				}
 			} else if (isNotification) {
 				// Fire-and-forget — handlers ignore the no-op reply.
 				this.config.onMessage(msg as McpRequest, () => {});

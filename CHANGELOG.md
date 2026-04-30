@@ -46,6 +46,17 @@ this is purely additive.
 - **10-second handler timeout** on every dispatched request. If a tool
   handler never replies, the client gets a JSON-RPC `-32603` after 10s
   rather than an HTTP request that hangs forever.
+- **Idle session expiry.** Streamable-HTTP sessions are dropped after 30
+  minutes of inactivity (sweep runs at the top of every `/mcp` request,
+  no background timer). Without this, a crashed or paused client would
+  leak authorized session ids forever — flagged by the adversarial
+  review.
+- **Strict MCP-Protocol-Version validation.** Per spec, every post-
+  initialize `/mcp` request MUST carry the negotiated version. We now
+  reject missing-or-unsupported headers with `400` before dispatching,
+  also flagged by the adversarial review.
+- **Honest connection accounting.** `clientCount` now sums SSE streams
+  and active `/mcp` sessions; previously the latter were invisible.
 - **Origin check + bearer-token auth** apply unchanged. A request to
   `/mcp` goes through the same gate as `/sse` and `/messages`.
 
@@ -60,7 +71,12 @@ this is purely additive.
   block that opens a parallel session over the modern transport and
   cross-checks tool count and dispatch behavior against the legacy
   `/sse` path.
-- Total tests now **147** (was 130 in v1.1.10).
+- **6 additional tests** for the second-pass fixes: protocol-version
+  validation (missing / unsupported / accepted / not-required-on-init)
+  and idle expiry (expires after 30 min, does NOT expire inside the
+  window). Time-based tests use `vi.setSystemTime` so they're
+  deterministic.
+- Total tests now **153** (was 130 in v1.1.10).
 
 ## v1.1.10 — 2026-04-30 (PR B: MetadataCache integration)
 

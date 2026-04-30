@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as http from "http";
 import { McpHttpServer } from "../../src/mcp/http-server";
 
@@ -234,9 +234,20 @@ describe("McpHttpServer Streamable HTTP (/mcp)", () => {
 	beforeEach(async () => {
 		server = new McpHttpServer({
 			onMessage: (req, reply) => {
-				// Echo the method as a successful result. Sufficient for
-				// transport-layer tests.
-				reply({ result: { method: req.method, params: req.params } });
+				// Echo the method back. For initialize, also echo a
+				// protocolVersion so the server can capture it for the
+				// post-init MCP-Protocol-Version header validation.
+				if (req.method === "initialize") {
+					reply({
+						result: {
+							protocolVersion: "2024-11-05",
+							capabilities: { tools: {} },
+							serverInfo: { name: "test", version: "0" },
+						},
+					});
+				} else {
+					reply({ result: { method: req.method, params: req.params } });
+				}
 			},
 			authToken: TOKEN,
 		});
@@ -247,20 +258,36 @@ describe("McpHttpServer Streamable HTTP (/mcp)", () => {
 		server.stop();
 	});
 
+	/**
+	 * Helper. Auto-injects MCP-Protocol-Version on post-init requests
+	 * (anything that's not `initialize`) so individual tests don't have
+	 * to repeat it. Tests of header validation override via extraHeaders
+	 * with a sentinel that this helper passes through unchanged.
+	 */
 	function postMcp(
 		body: any,
 		extraHeaders: Record<string, string> = {}
 	): Promise<FetchResult> {
+		const isInit = Array.isArray(body)
+			? body.some((m) => m?.method === "initialize")
+			: body?.method === "initialize";
+		const baseHeaders: Record<string, string> = {
+			"Content-Type": "application/json",
+			Authorization: `Bearer ${TOKEN}`,
+			Accept: "application/json",
+		};
+		if (!isInit && extraHeaders["Mcp-Session-Id"] !== undefined) {
+			// Default to the supported version unless the caller is
+			// explicitly testing header presence/absence.
+			if (extraHeaders["MCP-Protocol-Version"] === undefined) {
+				baseHeaders["MCP-Protocol-Version"] = "2024-11-05";
+			}
+		}
 		return fetchOnce(
 			"POST",
 			"/mcp",
 			port,
-			{
-				"Content-Type": "application/json",
-				Authorization: `Bearer ${TOKEN}`,
-				Accept: "application/json",
-				...extraHeaders,
-			},
+			{ ...baseHeaders, ...extraHeaders },
 			JSON.stringify(body)
 		);
 	}
@@ -481,6 +508,133 @@ describe("McpHttpServer Streamable HTTP (/mcp)", () => {
 			});
 			expect(res.status).toBe(405);
 			expect(res.headers["allow"]).toMatch(/POST/);
+		});
+	});
+
+	describe("MCP-Protocol-Version validation (post-init)", () => {
+		// All three tests follow the same pattern: initialize, then send
+		// a follow-up with the version header in some shape.
+
+		async function freshSession(): Promise<string> {
+			const init = await postMcp({
+				jsonrpc: "2.0",
+				id: 0,
+				method: "initialize",
+				params: {},
+			});
+			return init.headers["mcp-session-id"] as string;
+		}
+
+		it("rejects post-init requests missing the version header", async () => {
+			const sid = await freshSession();
+			// Use raw fetchOnce to deliberately omit MCP-Protocol-Version
+			// (postMcp would auto-inject it).
+			const res = await fetchOnce(
+				"POST",
+				"/mcp",
+				port,
+				{
+					"Content-Type": "application/json",
+					Authorization: `Bearer ${TOKEN}`,
+					Accept: "application/json",
+					"Mcp-Session-Id": sid,
+				},
+				JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" })
+			);
+			expect(res.status).toBe(400);
+			const err = JSON.parse(res.body);
+			expect(err.error?.message).toMatch(/MCP-Protocol-Version/i);
+		});
+
+		it("rejects requests with an unsupported version", async () => {
+			const sid = await freshSession();
+			const res = await postMcp(
+				{ jsonrpc: "2.0", id: 1, method: "tools/list" },
+				{ "Mcp-Session-Id": sid, "MCP-Protocol-Version": "9999-99-99" }
+			);
+			expect(res.status).toBe(400);
+			const err = JSON.parse(res.body);
+			expect(err.error?.message).toMatch(/Unsupported/i);
+		});
+
+		it("accepts requests with the negotiated version", async () => {
+			const sid = await freshSession();
+			const res = await postMcp(
+				{ jsonrpc: "2.0", id: 1, method: "tools/list" },
+				{ "Mcp-Session-Id": sid, "MCP-Protocol-Version": "2024-11-05" }
+			);
+			expect(res.status).toBe(200);
+		});
+
+		it("does not require the version header on initialize itself", async () => {
+			// Pre-negotiation, the client doesn't yet know what version
+			// the server speaks — requiring the header on initialize would
+			// be a chicken-and-egg violation. Should pass cleanly.
+			const res = await postMcp({
+				jsonrpc: "2.0",
+				id: 1,
+				method: "initialize",
+				params: {},
+			});
+			expect(res.status).toBe(200);
+		});
+	});
+
+	describe("session idle expiry", () => {
+		// Sweep is keyed off Date.now(); vi.setSystemTime fakes that for us.
+		afterEach(() => {
+			vi.useRealTimers();
+		});
+
+		it("expires idle sessions after 30 minutes of inactivity", async () => {
+			vi.useFakeTimers({
+				shouldAdvanceTime: true,
+				toFake: ["Date"],
+			});
+
+			const init = await postMcp({
+				jsonrpc: "2.0",
+				id: 0,
+				method: "initialize",
+				params: {},
+			});
+			const sid = init.headers["mcp-session-id"] as string;
+			expect(sid).toBeTruthy();
+
+			// Push the system clock forward past the 30-minute idle window.
+			// The next request triggers the sweep and the session is gone.
+			vi.setSystemTime(Date.now() + 31 * 60 * 1000);
+
+			const after = await postMcp(
+				{ jsonrpc: "2.0", id: 1, method: "tools/list" },
+				{ "Mcp-Session-Id": sid }
+			);
+			expect(after.status).toBe(404);
+			const err = JSON.parse(after.body);
+			expect(err.error?.message).toMatch(/expired|unknown/i);
+		});
+
+		it("does NOT expire sessions still inside the idle window", async () => {
+			vi.useFakeTimers({
+				shouldAdvanceTime: true,
+				toFake: ["Date"],
+			});
+
+			const init = await postMcp({
+				jsonrpc: "2.0",
+				id: 0,
+				method: "initialize",
+				params: {},
+			});
+			const sid = init.headers["mcp-session-id"] as string;
+
+			vi.setSystemTime(Date.now() + 5 * 60 * 1000); // only 5 min
+
+			const after = await postMcp(
+				{ jsonrpc: "2.0", id: 1, method: "tools/list" },
+				{ "Mcp-Session-Id": sid }
+			);
+			expect(after.status).toBe(200);
 		});
 	});
 
