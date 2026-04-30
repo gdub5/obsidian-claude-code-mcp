@@ -18,6 +18,68 @@ function makeRequest(
 	return { jsonrpc: "2.0", id, method, params };
 }
 
+// ──────────────────────────────────────────────────────────────────────
+// Annotation propagation across the wire
+//
+// The release notes claim "every tool carries safety annotations". Per-
+// definition tests in general-tools.test.ts and metadata-tools.test.ts
+// pin that for the source arrays, but the annotations also have to
+// survive the trip through `getToolDefinitions()` which strips the
+// internal `category` field. If the strip ever broadened to also drop
+// annotations (via a stale spread), every client downstream would lose
+// them silently. This test pins the contract end-to-end.
+
+describe("ToolRegistry annotation propagation", () => {
+	it("preserves `annotations` on getToolDefinitions() output", () => {
+		const registry = new ToolRegistry();
+		registry.register(
+			{
+				name: "demo",
+				description: "x",
+				category: "general",
+				inputSchema: { type: "object", properties: {} },
+				annotations: {
+					title: "Demo Tool",
+					readOnlyHint: true,
+					destructiveHint: false,
+					idempotentHint: true,
+					openWorldHint: false,
+				},
+			},
+			{ name: "demo", handler: () => Promise.resolve() }
+		);
+
+		const [emitted] = registry.getToolDefinitions();
+		// `category` should be stripped (it's an internal field)…
+		expect((emitted as any).category).toBeUndefined();
+		// …but `annotations` MUST survive.
+		expect(emitted.annotations).toBeDefined();
+		expect(emitted.annotations?.title).toBe("Demo Tool");
+		expect(emitted.annotations?.readOnlyHint).toBe(true);
+		expect(emitted.annotations?.openWorldHint).toBe(false);
+	});
+
+	it("getToolDefinitions() omits annotations when the source had none", () => {
+		// Backward compat: legacy tools that haven't been annotated yet
+		// shouldn't get an empty `annotations: {}` synthesized — the
+		// field is optional in the wire format and clients distinguish
+		// "absent" from "all-false".
+		const registry = new ToolRegistry();
+		registry.register(
+			{
+				name: "legacy",
+				description: "x",
+				category: "general",
+				inputSchema: { type: "object", properties: {} },
+			},
+			{ name: "legacy", handler: () => Promise.resolve() }
+		);
+
+		const [emitted] = registry.getToolDefinitions();
+		expect(emitted.annotations).toBeUndefined();
+	});
+});
+
 describe("ToolRegistry", () => {
 	describe("register", () => {
 		it("registers a tool when names match", () => {

@@ -46,6 +46,10 @@ Concrete categorization:
 - **Write, destructive** (overwrites content): `str_replace`.
 - **Escape hatch** (arbitrary code, can do anything):
   `obsidian_api` — `destructiveHint: true`, `openWorldHint: true`.
+- **IDE-specific stubs** (WebSocket-only, all stubs that just
+  acknowledge): `openDiff`, `close_tab`, `closeAllDiffTabs`,
+  `getDiagnostics`. Annotated as read-only / closed-world since they
+  don't actually do anything.
 
 ### What's intentionally NOT in this release
 
@@ -72,11 +76,14 @@ worse than the current honest "we don't implement that":
 
 ### Tests
 
-- 9 new tests: protocol-version negotiation (latest by default,
+- 11 new tests: protocol-version negotiation (latest by default,
   echoes supported version, falls back on unsupported, both versions
   reachable); annotations presence + correctness on every tool;
-  metadata tools categorized as read-only/idempotent.
-- Total tests now **174** (was 165 in v1.1.11).
+  metadata tools categorized as read-only/idempotent; registry-level
+  end-to-end test that annotations survive `getToolDefinitions()`
+  serialization (catches a class of regression where a future field
+  strip might accidentally drop them).
+- Total tests now **173** (was 165 in v1.1.11).
 
 ### Validated against MCP Inspector
 

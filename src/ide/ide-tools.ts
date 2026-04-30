@@ -2,6 +2,16 @@ import { App } from "obsidian";
 import { McpReplyFunction } from "../mcp/types";
 import { ToolImplementation, ToolDefinition } from "../shared/tool-registry";
 
+// All IDE tools are stubs that just acknowledge the call — they don't
+// modify vault state or reach beyond the workspace, so they share the
+// same "harmless side-effect-free acknowledgment" annotations.
+const IDE_STUB_ANNOTATIONS = {
+	readOnlyHint: true,
+	destructiveHint: false,
+	idempotentHint: true,
+	openWorldHint: false,
+} as const;
+
 // IDE-specific tool definitions
 export const IDE_TOOL_DEFINITIONS: ToolDefinition[] = [
 	{
@@ -29,6 +39,7 @@ export const IDE_TOOL_DEFINITIONS: ToolDefinition[] = [
 				},
 			},
 		},
+		annotations: { title: "Open Diff View (stub)", ...IDE_STUB_ANNOTATIONS },
 	},
 	{
 		name: "close_tab",
@@ -43,6 +54,7 @@ export const IDE_TOOL_DEFINITIONS: ToolDefinition[] = [
 				},
 			},
 		},
+		annotations: { title: "Close Tab (stub)", ...IDE_STUB_ANNOTATIONS },
 	},
 	{
 		name: "closeAllDiffTabs",
@@ -52,6 +64,7 @@ export const IDE_TOOL_DEFINITIONS: ToolDefinition[] = [
 			type: "object",
 			properties: {},
 		},
+		annotations: { title: "Close All Diff Tabs (stub)", ...IDE_STUB_ANNOTATIONS },
 	},
 	{
 		name: "getDiagnostics",
@@ -61,6 +74,7 @@ export const IDE_TOOL_DEFINITIONS: ToolDefinition[] = [
 			type: "object",
 			properties: {},
 		},
+		annotations: { title: "Get Diagnostics", ...IDE_STUB_ANNOTATIONS },
 	},
 ];
 
