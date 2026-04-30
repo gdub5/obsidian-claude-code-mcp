@@ -51,3 +51,6 @@ coverage/
 # may include secrets (auth tokens passed via env vars in Bash commands).
 # Never commit this; it's per-developer state.
 .claude/settings.local.json
+
+# Project-local Claude Code guidance — not shipping content.
+CLAUDE.md
