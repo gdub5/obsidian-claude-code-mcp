@@ -279,15 +279,44 @@ export interface CachedMetadata {
 	headings?: Array<{ heading: string; level: number }>;
 }
 
+/**
+ * Mocks the `app.plugins` namespace just enough to test community-plugin
+ * wrapping. Real Obsidian's PluginManager has many more methods; we model
+ * only `plugins[id] = { api: ... }` since that's the contract every wrapped
+ * plugin uses.
+ */
+export class PluginRegistry {
+	plugins: Record<string, any> = {};
+	enabledPlugins: Set<string> = new Set();
+
+	// ── test helpers — not part of the real Obsidian API ────────────────
+
+	/**
+	 * Seed an installed + enabled plugin with its `api` object. Pass an
+	 * empty `api: {}` to model "plugin is installed but exposes nothing".
+	 */
+	__seedPlugin(id: string, api: any): void {
+		this.plugins[id] = { api, manifest: { id, name: id, version: "0.0.0-test" } };
+		this.enabledPlugins.add(id);
+	}
+
+	__removePlugin(id: string): void {
+		delete this.plugins[id];
+		this.enabledPlugins.delete(id);
+	}
+}
+
 export class App {
 	vault: Vault;
 	workspace: Workspace;
 	metadataCache: MetadataCache;
+	plugins: PluginRegistry;
 
 	constructor(vault?: Vault) {
 		this.vault = vault ?? new Vault();
 		this.workspace = new Workspace();
 		this.metadataCache = new MetadataCache();
+		this.plugins = new PluginRegistry();
 	}
 }
 

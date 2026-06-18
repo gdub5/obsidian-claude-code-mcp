@@ -8,6 +8,7 @@ import { WorkspaceManager } from "../obsidian/workspace-manager";
 import { ToolRegistry } from "../shared/tool-registry";
 import { GeneralTools, GENERAL_TOOL_DEFINITIONS } from "../tools/general-tools";
 import { MetadataTools, METADATA_TOOL_DEFINITIONS } from "../tools/metadata-tools";
+import { PluginTools } from "../tools/plugin-tools";
 import { IdeTools, IDE_TOOL_DEFINITIONS } from "../ide/ide-tools";
 
 export interface DualServerConfig {
@@ -74,6 +75,27 @@ export class McpDualServer {
 			new MetadataTools(this.config.app).createImplementations(),
 			METADATA_TOOL_DEFINITIONS
 		);
+
+		// Register community-plugin gateway tools (omnisearch, extract_text,
+		// dataview_query). Only the tools whose backing plugins are
+		// installed + enabled at server-start time are registered. The
+		// PluginTools class returns a self-consistent (definitions,
+		// implementations) pair, so we filter at the source rather than
+		// per-tool here.
+		const pluginTools = new PluginTools(this.config.app);
+		const pluginDefinitions = pluginTools.getDefinitions();
+		const pluginImplementations = pluginTools.createImplementations();
+		if (pluginDefinitions.length > 0) {
+			this.registerToBothRegistries(pluginImplementations, pluginDefinitions);
+			console.debug(
+				"[McpDualServer] community-plugin tools registered:",
+				pluginDefinitions.map((d) => d.name)
+			);
+		} else {
+			console.debug(
+				"[McpDualServer] no community-plugin tools registered (none of omnisearch/text-extractor/dataview installed)"
+			);
+		}
 
 		// Register IDE-specific tools ONLY to WebSocket registry
 		const ideTools = new IdeTools(this.config.app);

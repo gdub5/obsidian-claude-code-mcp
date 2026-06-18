@@ -487,6 +487,103 @@ async function main() {
 		if (!hit) warn("search_vault should be case-insensitive by default");
 	}
 
+	log("\n─── community-plugin gateway tools (PR D) ─────────────────");
+	// These tools register only when their backing community plugin is
+	// installed + enabled. Detect via tools/list; skip with a warning if
+	// the user hasn't installed the plugin in this vault.
+	{
+		const registered = new Set(tools.result.tools.map((t) => t.name));
+
+		// omnisearch
+		if (registered.has("omnisearch")) {
+			const r = await callTool("omnisearch", { query: "rlc", max_results: 3 });
+			const text = textOf(r.result);
+			const hasResults =
+				text.toLowerCase().includes("results") ||
+				text.toLowerCase().includes("no matches");
+			log(`  omnisearch('rlc') → ${hasResults ? "ok" : "MALFORMED"} (${fmt(r.elapsed)})`);
+			if (!hasResults) warn("omnisearch returned an unexpected shape");
+			// Also exercise the empty-result path
+			const empty = await callTool("omnisearch", {
+				query: "zzqxquetzal-no-such-thing-999",
+			});
+			const emptyOk = textOf(empty.result).toLowerCase().includes("no matches");
+			log(`  omnisearch('<nonsense>') → no-match path ${emptyOk ? "ok" : "BROKEN"} (${fmt(empty.elapsed)})`);
+			if (!emptyOk) warn("omnisearch no-match handling broken");
+		} else {
+			log("  omnisearch — not registered (Omnisearch plugin not installed in this vault)");
+		}
+
+		// extract_text — needs a PDF or other non-md file in the vault
+		if (registered.has("extract_text")) {
+			// Find a non-markdown file via get_workspace_files
+			const ls = await callTool("get_workspace_files", {});
+			const nonMd = textOf(ls.result)
+				.split("\n")
+				.filter(
+					(p) =>
+						p.includes(".") &&
+						!p.endsWith(".md") &&
+						!p.endsWith(":") &&
+						!p.startsWith("Files") &&
+						!p.startsWith("__")
+				);
+			if (nonMd.length === 0) {
+				log("  extract_text — registered, but no non-md files in vault to exercise");
+			} else {
+				const target = nonMd.find((p) => p.endsWith(".pdf")) ?? nonMd[0];
+				try {
+					const r = await callTool("extract_text", { path: target });
+					const text = textOf(r.result);
+					const ok = text.startsWith("Extracted ");
+					log(`  extract_text(${target}) → ${ok ? "ok" : "MALFORMED"} (${fmt(r.elapsed)})`);
+					if (!ok) warn("extract_text returned an unexpected shape");
+				} catch (err) {
+					// Unsupported format is a legitimate result here — log
+					// but don't warn (depends on vault contents).
+					log(`  extract_text(${target}) → ${err.code}: ${err.message}`);
+				}
+			}
+
+			// Negative: refuses markdown files
+			try {
+				await callTool("extract_text", { path: "links/hub.md" });
+				warn("extract_text accepted a markdown file (should refuse)");
+			} catch (err) {
+				log(`  extract_text(<markdown>) → blocked (${err.code}: ${err.message})`);
+			}
+		} else {
+			log("  extract_text — not registered (Text Extractor plugin not installed)");
+		}
+
+		// dataview_query
+		if (registered.has("dataview_query")) {
+			const r = await callTool("dataview_query", {
+				query: "LIST FROM \"\" LIMIT 3",
+			});
+			const text = textOf(r.result);
+			// Very permissive check: query was successful (no isError marker)
+			// and we got a non-empty string back, OR it was successful with
+			// an empty value (which is fine for an empty vault).
+			const errored = r.result?.isError === true;
+			log(`  dataview_query(LIST LIMIT 3) → successful=${!errored} (${fmt(r.elapsed)})`);
+			if (errored) warn("dataview LIST query returned isError on a basic query");
+
+			// Negative: bad DQL → isError:true (NOT a JSON-RPC error)
+			const bad = await callTool("dataview_query", {
+				query: "BOGUS NOT A REAL DQL QUERY",
+			});
+			const badIsError = bad.result?.isError === true;
+			const hasErrorText = /failed|parsing|error/i.test(textOf(bad.result));
+			log(
+				`  dataview_query(<bogus>) → isError=${badIsError} containsErrorText=${hasErrorText}`
+			);
+			if (!badIsError) warn("bad DQL should return result.isError:true per MCP spec");
+		} else {
+			log("  dataview_query — not registered (Dataview plugin not installed)");
+		}
+	}
+
 	log("\n─── streamable HTTP transport (PR C — /mcp) ────────────────");
 	// New endpoint sits alongside /sse + /messages. Drives a parallel
 	// session over the modern transport. If anything diverges between the
