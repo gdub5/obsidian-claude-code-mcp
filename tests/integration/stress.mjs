@@ -9,27 +9,41 @@
  *
  * Configuration (via env or CLI):
  *   MCP_TOKEN   bearer token (required)
- *   MCP_URL     base URL, default http://localhost:48888 (test vault port)
+ *   MCP_URL     base URL — REQUIRED, no default (e.g. http://localhost:48887)
  *   SCRATCH     scratch folder name in the vault, default __scratch__
+ *   MCP_ASSUME_YES  set to 1 to skip the interactive target confirmation (CI)
  *
- *   Or as positional args: stress.mjs <token> [base-url]
+ *   Or as positional args: stress.mjs <token> <base-url>
  *
  * Tests are scoped to SCRATCH/. The harness will not touch any path
- * outside that folder, so it's safe to run against the fixture vault
- * (or any vault, in principle).
+ * outside that folder. Even so, there is NO default target: you must name
+ * the URL explicitly and confirm it before the run starts, so the harness
+ * can never silently point at the wrong (e.g. a real, non-test) vault.
  */
 
 import http from "node:http";
 import { performance } from "node:perf_hooks";
+import readline from "node:readline";
 
 const TOKEN = process.env.MCP_TOKEN || process.argv[2];
-const BASE_URL = process.env.MCP_URL || process.argv[3] || "http://localhost:48888";
+const BASE_URL = process.env.MCP_URL || process.argv[3];
 const SCRATCH = process.env.SCRATCH || "__scratch__";
+const ASSUME_YES = process.env.MCP_ASSUME_YES === "1" || process.argv.includes("--yes");
 
 if (!TOKEN) {
 	console.error(
-		"usage: MCP_TOKEN=... node tests/integration/stress.mjs [base-url]\n" +
-			"   or: node tests/integration/stress.mjs <token> [base-url]"
+		"usage: MCP_TOKEN=... MCP_URL=http://localhost:<port> node tests/integration/stress.mjs\n" +
+			"   or: node tests/integration/stress.mjs <token> <base-url>"
+	);
+	process.exit(1);
+}
+
+if (!BASE_URL) {
+	console.error(
+		"refusing to run: no target URL given.\n" +
+			"This harness writes to the vault — name the target explicitly so it can\n" +
+			"never default onto the wrong vault. Pass MCP_URL=http://localhost:<port>\n" +
+			"(your TEST vault's MCP HTTP port, shown in Settings → MCP Server Status)."
 	);
 	process.exit(1);
 }
@@ -203,7 +217,32 @@ async function clearScratch() {
 	`);
 }
 
+function confirmTarget() {
+	return new Promise((resolve) => {
+		const summary =
+			`\nAbout to run the stress harness — it WRITES to this vault's ${SCRATCH}/ folder.\n` +
+			`  Target : ${BASE_URL}  (host ${HOST}, port ${PORT})\n` +
+			`  Scope  : ${SCRATCH}/\n` +
+			`Confirm this is your TEST vault's port (Settings → MCP Server Status),\n` +
+			`NOT a real/live vault.\n`;
+		if (ASSUME_YES) {
+			log(summary + "Proceeding (--yes / MCP_ASSUME_YES=1).");
+			resolve(true);
+			return;
+		}
+		const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+		rl.question(`${summary}Proceed against port ${PORT}? [y/N] `, (ans) => {
+			rl.close();
+			resolve(/^y(es)?$/i.test(ans.trim()));
+		});
+	});
+}
+
 async function main() {
+	if (!(await confirmTarget())) {
+		log("Aborted — target not confirmed.");
+		process.exit(1);
+	}
 	log("→ opening SSE session…");
 	await openSession();
 	log(`✓ session: ${sessionId}\n`);
