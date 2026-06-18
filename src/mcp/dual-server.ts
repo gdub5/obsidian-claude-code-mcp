@@ -23,6 +23,11 @@ export interface DualServerConfig {
 	 * HTTP/SSE transports. Required — both servers refuse to start without it.
 	 */
 	authToken: string;
+	/**
+	 * Optional server instructions returned in the MCP `initialize` response.
+	 * Omitted from the response when empty.
+	 */
+	instructions?: string;
 }
 
 export class McpDualServer {
@@ -50,7 +55,8 @@ export class McpDualServer {
 			this.wsToolRegistry,
 			this.httpToolRegistry,
 			config.workspaceManager,
-			config.serverVersion
+			config.serverVersion,
+			config.instructions
 		);
 	}
 

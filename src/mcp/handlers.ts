@@ -54,18 +54,21 @@ export class McpHandlers {
 	private httpToolRegistry: ToolRegistry;
 	private ideHandler: IdeHandler;
 	private serverVersion: string;
+	private instructions?: string;
 
 	constructor(
 		private app: App,
 		wsToolRegistry: ToolRegistry,
 		httpToolRegistry: ToolRegistry,
 		workspaceManager?: WorkspaceManager,
-		serverVersion = "0.0.0-dev"
+		serverVersion = "0.0.0-dev",
+		instructions?: string
 	) {
 		this.wsToolRegistry = wsToolRegistry;
 		this.httpToolRegistry = httpToolRegistry;
 		this.ideHandler = new IdeHandler(app, workspaceManager);
 		this.serverVersion = serverVersion;
+		this.instructions = instructions;
 	}
 
 	async handleRequest(sock: WebSocket, req: McpRequest): Promise<void> {
@@ -153,6 +156,9 @@ export class McpHandlers {
 		try {
 			const requestedVersion = (req.params as any)?.protocolVersion;
 			const negotiatedVersion = negotiateProtocolVersion(requestedVersion);
+			const hasInstructions =
+				typeof this.instructions === "string" &&
+				this.instructions.trim().length > 0;
 			reply({
 				result: {
 					protocolVersion: negotiatedVersion,
@@ -171,6 +177,11 @@ export class McpHandlers {
 						name: SERVER_NAME,
 						version: this.serverVersion,
 					},
+					// Standard optional MCP field. Sent verbatim when the
+					// user has configured it; omitted entirely when blank.
+					...(hasInstructions
+						? { instructions: this.instructions }
+						: {}),
 				},
 			});
 		} catch (error: any) {

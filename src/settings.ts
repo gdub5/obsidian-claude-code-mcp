@@ -16,6 +16,13 @@ export interface ClaudeCodeSettings {
 	 * from the settings tab.
 	 */
 	mcpAuthToken: string;
+	/**
+	 * Optional server instructions string returned in the MCP `initialize`
+	 * response (the standard `instructions` field). Tells connecting clients
+	 * how to use the server. Blank by default — when empty, no `instructions`
+	 * field is sent. Editable from the settings tab.
+	 */
+	mcpInstructions: string;
 }
 
 export const DEFAULT_SETTINGS: ClaudeCodeSettings = {
@@ -26,6 +33,7 @@ export const DEFAULT_SETTINGS: ClaudeCodeSettings = {
 	enableHttpServer: true,
 	enableEmbeddedTerminal: true,
 	mcpAuthToken: "", // populated on first load
+	mcpInstructions: "", // optional; sent in MCP initialize only when set
 };
 
 /**
@@ -127,6 +135,59 @@ export class ClaudeCodeSettingTab extends PluginSettingTab {
 					if (this.plugin.settings.enableHttpServer) {
 						await this.plugin.restartMcpServer();
 						// Refresh the display to show updated status
+						this.display();
+					}
+				});
+			});
+
+		const instructionsSetting = new Setting(containerEl)
+			.setName("MCP instructions")
+			.setDesc(
+				"Optional instructions sent to MCP clients in the initialize response. Leave blank to send nothing. Applies on the next client connection (the server restarts when you leave this field)."
+			);
+		// Stack the text area full-width BELOW the name/description rather
+		// than squeezing it into Obsidian's right-hand control column — the
+		// default row layout is too narrow for multi-line instructions.
+		instructionsSetting.settingEl.style.display = "block";
+		instructionsSetting.controlEl.style.width = "100%";
+		instructionsSetting.controlEl.style.paddingTop = "0.5em";
+		instructionsSetting.addTextArea((text) => {
+				text
+					.setPlaceholder(
+						"e.g. Before any task, open AGENTS.md (via the view tool) and follow it."
+					)
+					.setValue(this.plugin.settings.mcpInstructions)
+					.onChange(async (value) => {
+						// Save on change; defer the restart to blur.
+						this.plugin.settings.mcpInstructions = value;
+						await this.plugin.saveSettings();
+					});
+				text.inputEl.rows = 4;
+				text.inputEl.style.width = "100%";
+				// Cap length defensively. Instructions are short guidance
+				// text; this also bounds the per-connection `initialize`
+				// payload. Local-only trust model, so this is belt-and-suspenders.
+				text.inputEl.maxLength = 8192;
+
+				// Restart only on blur, and only if the value actually changed,
+				// so the new handler instance picks up the edited string.
+				// Normalize to the trimmed value on blur so what we store is
+				// exactly what the server sends — a whitespace-only string is
+				// treated as blank by the server, so persist it as blank too
+				// (avoids a stored-vs-sent mismatch).
+				let lastValue = this.plugin.settings.mcpInstructions;
+				text.inputEl.addEventListener("blur", async () => {
+					const trimmed = text.getValue().trim();
+					if (trimmed !== text.getValue()) {
+						text.setValue(trimmed);
+					}
+					if (trimmed === lastValue) return;
+					lastValue = trimmed;
+					this.plugin.settings.mcpInstructions = trimmed;
+					await this.plugin.saveSettings();
+					if (this.plugin.settings.enableHttpServer ||
+						this.plugin.settings.enableWebSocketServer) {
+						await this.plugin.restartMcpServer();
 						this.display();
 					}
 				});
