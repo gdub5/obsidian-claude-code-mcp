@@ -25,7 +25,7 @@ NC='\033[0m'
 # Default — override by passing a path as the first arg, or by exporting
 # OBSIDIAN_PLUGIN_PATH. Edit this only if you want a different out-of-the-box
 # install location for yourself.
-DEFAULT_TARGET="$HOME/kb/Personal/.obsidian/plugins/claude-code-mcp"
+DEFAULT_TARGET="$HOME/path/to/your/vault/.obsidian/plugins/claude-code-mcp"
 
 REQUIRED_FILES=("main.js" "manifest.json" "styles.css")
 

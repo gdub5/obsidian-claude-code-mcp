@@ -36,6 +36,9 @@ test-*.js
 terminal-pty-research.md
 plan.md
 
+# Internal development logs — not shipping content
+devlog/
+
 # Build artifacts
 *.tsbuildinfo
 

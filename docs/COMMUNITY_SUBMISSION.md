@@ -10,9 +10,9 @@ This document provides step-by-step instructions for submitting the Claude Code 
 {
 	"id": "claude-code-mcp",
 	"name": "Claude Code MCP",
-	"author": "iansinnott",
+	"author": "gdub5",
 	"description": "Connect Claude Code and other AI tools to your notes using Model Context Protocol (MCP).",
-	"repo": "iansinnott/obsidian-claude-code-mcp"
+	"repo": "gdub5/obsidian-claude-code-mcp"
 }
 ```
 
@@ -20,7 +20,7 @@ This document provides step-by-step instructions for submitting the Claude Code 
 
 ### 1. Prepare Repository
 
--   [x] Repository is public: `https://github.com/iansinnott/obsidian-claude-code-mcp`
+-   [x] Repository is public: `https://github.com/gdub5/obsidian-claude-code-mcp`
 -   [x] All required files are present and valid
 -   [x] Latest release is created with proper artifacts
 -   [x] Documentation is comprehensive and user-friendly
@@ -30,13 +30,14 @@ This document provides step-by-step instructions for submitting the Claude Code 
 Before submitting, ensure you have a proper GitHub release:
 
 ```bash
-# Update version (if needed)
-bun run version patch
+# Update version (if needed) — npm runs the `version` script in package.json,
+# which syncs manifest.json + versions.json via version-bump.mjs
+npm version patch
 
 # Build the plugin
 bun run build
 
-# Create GitHub release with tag v1.1.3
+# Create GitHub release with the version number as the tag (no 'v' prefix), e.g. 1.1.13
 # Upload these files as binary attachments:
 # - manifest.json
 # - main.js
@@ -58,9 +59,9 @@ bun run build
 {
 	"id": "claude-code-mcp",
 	"name": "Claude Code MCP",
-	"author": "iansinnott",
+	"author": "gdub5",
 	"description": "Connect Claude Code and other AI tools to your notes using Model Context Protocol (MCP).",
-	"repo": "iansinnott/obsidian-claude-code-mcp"
+	"repo": "gdub5/obsidian-claude-code-mcp"
 }
 ```
 
@@ -89,9 +90,9 @@ jq . community-plugins.json
 ## Plugin Information
 
 -   **Name:** Claude Code MCP
--   **Author:** iansinnott
--   **Repository:** https://github.com/iansinnott/obsidian-claude-code-mcp
--   **Latest Release:** v1.1.3
+-   **Author:** gdub5
+-   **Repository:** https://github.com/gdub5/obsidian-claude-code-mcp
+-   **Latest Release:** 1.1.13
 
 ## Description
 
@@ -99,7 +100,7 @@ This plugin implements an MCP (Model Context Protocol) server to enable Claude C
 
 ## Key Features
 
--   Dual transport MCP server (WebSocket + HTTP/SSE)
+-   Multi-transport MCP server (WebSocket, modern Streamable HTTP at `/mcp`, and legacy HTTP/SSE at `/sse`)
 -   Auto-discovery for Claude Code CLI
 -   File operations through MCP protocol
 -   Workspace context and vault structure access
@@ -110,8 +111,8 @@ This plugin implements an MCP (Model Context Protocol) server to enable Claude C
 
 -   **Desktop Only:** Yes (requires WebSocket server capabilities)
 -   **Dependencies:** All bundled, no external runtime dependencies
--   **Min Obsidian Version:** 0.15.0
--   **File Size:** ~694KB (bundled)
+-   **Min Obsidian Version:** 1.0.0
+-   **File Size:** ~720KB (bundled)
 
 ## Testing
 
@@ -134,7 +135,7 @@ This plugin implements an MCP (Model Context Protocol) server to enable Claude C
 
 -   [x] Public repository with clear README
 -   [x] Proper versioning and release process
--   [x] MIT licensed
+-   [x] ISC licensed
 -   [x] Clean codebase with TypeScript
 -   [x] No malicious code or dependencies
 

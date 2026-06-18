@@ -81,7 +81,7 @@ This checklist ensures the plugin meets all requirements for Obsidian community 
 
 ### ✅ **Version Management**
 
--   [ ] Update version using `bun run version patch/minor/major`
+-   [ ] Update version using `npm version patch` (or `minor`/`major`) — this runs the `version` script in package.json, which syncs manifest.json + versions.json
 -   [ ] All version files updated consistently:
     -   `package.json`
     -   `manifest.json`
@@ -91,7 +91,7 @@ This checklist ensures the plugin meets all requirements for Obsidian community 
 ### ✅ **GitHub Release**
 
 -   [ ] Create GitHub release with version number as tag
--   [ ] Release title follows format: "v1.2.3"
+-   [ ] Release title follows format: "1.2.3" (no 'v' prefix, matching the tag)
 -   [ ] Release description includes:
     -   New features
     -   Bug fixes
@@ -127,9 +127,9 @@ This checklist ensures the plugin meets all requirements for Obsidian community 
     {
     	"id": "claude-code-mcp",
     	"name": "Claude Code MCP",
-    	"author": "iansinnott",
+    	"author": "gdub5",
     	"description": "Connect Claude Code and other AI tools to your notes using Model Context Protocol (MCP).",
-    	"repo": "iansinnott/obsidian-claude-code-mcp"
+    	"repo": "gdub5/obsidian-claude-code-mcp"
     }
     ```
 -   [ ] Verify JSON syntax is valid

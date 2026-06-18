@@ -29,7 +29,8 @@ The actual location depends on which directory exists or which Claude Code creat
   "pid": process_id,
   "workspaceFolders": ["/absolute/path/to/workspace"],
   "ideName": "IDE Name",
-  "transport": "ws"
+  "transport": "ws",
+  "authToken": "<per-vault bearer token>"
 }
 ```
 
@@ -37,6 +38,9 @@ The actual location depends on which directory exists or which Claude Code creat
 - Lock file MUST be named `[port].lock` where `port` is the WebSocket server port
 - Claude Code CLI scans this directory to discover available IDE connections
 - The `workspaceFolders` array should contain absolute paths to workspace roots
+- The `authToken` field carries the per-vault bearer token. Claude Code reads it
+  from the lock file and presents it on the WebSocket upgrade request; the server
+  rejects upgrades without a valid token (see [Authentication](#authentication)).
 
 ## WebSocket Server Configuration
 
@@ -89,107 +93,131 @@ interface McpResponse {
 
 ## Supported MCP Methods
 
-### Core File Operations
+This plugin speaks standard MCP. There are **no** custom JSON-RPC method aliases
+such as `readFile`/`writeFile`/`listFiles` — all file, workspace, and
+knowledge-graph operations are exposed as **tools** and invoked through
+`tools/call`. The core methods the server handles are:
 
-#### `readFile`
-Read file contents from workspace.
+| Method | Type | Purpose |
+| --- | --- | --- |
+| `initialize` | request | Handshake; negotiates protocol version and returns server capabilities |
+| `notifications/initialized` | notification | Client signals it's ready; no response is sent |
+| `tools/list` | request | Returns the available tool definitions (with input schemas and safety annotations) |
+| `tools/call` | request | Invokes a named tool with arguments |
+| `ping` | request | Liveness check; returns an empty result |
+
+The IDE/WebSocket transport additionally handles the `ide_connected` notification
+during connection setup (see `src/ide/ide-handler.ts`).
+
+### `initialize`
+
+The client sends its requested protocol version; the server negotiates against
+the versions it supports (`2025-11-25` preferred, `2024-11-05` legacy) and echoes
+the chosen version back along with its capabilities and instructions.
 
 ```json
 {
   "jsonrpc": "2.0",
-  "method": "readFile",
-  "params": { "path": "relative/path/to/file.txt" },
+  "method": "initialize",
+  "params": {
+    "protocolVersion": "2025-11-25",
+    "capabilities": {},
+    "clientInfo": { "name": "claude-code", "version": "x.y.z" }
+  },
   "id": 1
 }
 ```
 
-Response:
+Response (version-negotiated; tools capability advertised):
+
 ```json
 {
   "jsonrpc": "2.0",
   "id": 1,
-  "result": "file contents here"
+  "result": {
+    "protocolVersion": "2025-11-25",
+    "capabilities": { "tools": {} },
+    "serverInfo": { "name": "obsidian-claude-code-mcp", "version": "1.1.13" }
+  }
 }
 ```
 
-#### `writeFile`
-Write content to workspace file.
+### `tools/list`
+
+Returns the registered tools. The set depends on the transport: shared tools
+(`view`, `str_replace`, `create`, `insert`, `get_current_file`,
+`get_workspace_files`, `get_frontmatter`, `get_backlinks`, `get_outgoing_links`,
+`list_tags`, `find_by_tag`, `search_vault`, `obsidian_api`) are available on both
+the WebSocket and HTTP transports; IDE-specific tools (`getDiagnostics`,
+`openDiff`, `close_tab`, `closeAllDiffTabs`) are WebSocket-only.
+
+### `tools/call`
+
+Invokes a tool by name. Example — read a file via the `view` tool:
 
 ```json
 {
   "jsonrpc": "2.0",
-  "method": "writeFile",
-  "params": { 
-    "path": "relative/path/to/file.txt",
-    "content": "new file contents"
+  "method": "tools/call",
+  "params": {
+    "name": "view",
+    "arguments": { "path": "relative/path/to/file.md" }
   },
   "id": 2
 }
 ```
 
-#### `listFiles`
-List files in workspace with optional pattern filtering.
+Response (MCP tool-result content blocks):
 
 ```json
 {
   "jsonrpc": "2.0",
-  "method": "listFiles",
-  "params": { "pattern": "*.js" },  // Optional
-  "id": 3
-}
-```
-
-### Workspace Context
-
-#### `getWorkspaceInfo`
-Get metadata about the current workspace.
-
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "getWorkspaceInfo",
-  "params": {},
-  "id": 4
-}
-```
-
-Response:
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
+  "id": 2,
   "result": {
-    "name": "workspace-name",
-    "path": "/absolute/path/to/workspace",
-    "fileCount": 150,
-    "type": "obsidian-vault"
+    "content": [{ "type": "text", "text": "file contents here" }],
+    "isError": false
   }
 }
 ```
 
-#### `getOpenFiles`
-Get list of currently open/active files.
+## Protocol Version Negotiation
 
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "getOpenFiles",
-  "params": {},
-  "id": 5
-}
-```
+The server supports two MCP specification versions and negotiates per connection:
 
-#### `getCurrentFile`
-Get the currently active/focused file.
+- **`2025-11-25`** — modern Streamable HTTP transport, preferred/default.
+- **`2024-11-05`** — legacy "HTTP with SSE" transport, kept for older clients.
 
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "getCurrentFile",
-  "params": {},
-  "id": 6
-}
-```
+On `initialize`, the client's requested `protocolVersion` is matched against the
+supported set; if the client requests a version the server doesn't support, the
+server replies with its preferred version (and, on the Streamable HTTP transport,
+locks the session to the negotiated version — see below).
+
+## Transports
+
+Three transports are available, all gated by the bearer token:
+
+1. **WebSocket** (this document's focus) — used by Claude Code via lock-file
+   discovery. Token presented on the upgrade request.
+2. **Streamable HTTP** — `POST`/`DELETE` on `/mcp` (MCP `2025-11-25`). Uses an
+   `Mcp-Session-Id` header (minted at `initialize`, required on subsequent
+   requests) and an `MCP-Protocol-Version` header after initialize.
+3. **Legacy HTTP/SSE** — `GET /sse` + `POST /messages` (MCP `2024-11-05`).
+
+For HTTP client configuration (URLs, headers, `mcp-remote` bridge), see the
+**MCP Client Configuration** section of the project `README.md`.
+
+## Authentication
+
+Both transports require a per-vault bearer token (auto-generated on first plugin
+load, rotatable in settings):
+
+- **WebSocket**: the token is written into the `[port].lock` file (`authToken`
+  field) and presented on the upgrade request. Upgrades without a valid token are
+  rejected.
+- **HTTP/SSE and Streamable HTTP**: send `Authorization: Bearer <token>`. The
+  legacy SSE `GET` endpoint also accepts `?token=<token>` as a query parameter
+  for clients that can't set custom headers. The HTTP server binds to `127.0.0.1`
+  only and rejects non-loopback `Origin` headers.
 
 ## Error Handling
 

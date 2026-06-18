@@ -4,9 +4,12 @@ An Obsidian plugin that implements an MCP (Model Context Protocol) server to ena
 
 This plugin allows Claude Code and other MCP clients (like Claude Desktop) to interact with your Obsidian vault, providing AI-powered assistance with direct access to your notes and files.
 
+> This is a fork of [obsidian-claude-code-mcp](https://github.com/iansinnott/obsidian-claude-code-mcp)
+> by Ian Sinnott (originally ISC-licensed, © Dynalist Inc.), maintained by gdub5.
+
 ## Features
 
--   **Dual Transport MCP Server**: Supports both WebSocket (for Claude Code) and HTTP/SSE (for Claude Desktop)
+-   **Multi-Transport MCP Server**: WebSocket (for Claude Code), modern Streamable HTTP at `/mcp` (MCP spec `2025-11-25`), and legacy HTTP/SSE at `/sse` (MCP spec `2024-11-05`) for older clients
 -   **Auto-Discovery**: Claude Code automatically finds and connects to your vault
 -   **Bearer-Token Auth**: Both transports require a per-vault token (auto-generated, rotatable in settings); HTTP server is loopback-only and origin-checked
 -   **File Operations**: Read and write vault files through MCP protocol
@@ -55,9 +58,27 @@ Claude Desktop requires a special configuration to connect to the Obsidian MCP s
 
 ### Other MCP Clients (with direct HTTP support)
 
-If you are using an MCP client that directly supports the legacy "HTTP with SSE" transport, you can connect without the `mcp-remote` bridge — but you still need to send the bearer token.
+The server exposes two HTTP endpoints, both protected by the bearer token:
 
-**Example Configuration:**
+-   **`/mcp` — modern Streamable HTTP** (MCP spec `2025-11-25`). Use this if your client supports the current Streamable HTTP transport.
+-   **`/sse` — legacy HTTP with SSE** (MCP spec `2024-11-05`). Use this for older clients that only speak the SSE transport.
+
+**Streamable HTTP (`/mcp`) — preferred:**
+
+```json
+{
+	"mcpServers": {
+		"obsidian": {
+			"url": "http://localhost:22360/mcp",
+			"headers": {
+				"Authorization": "Bearer <token-from-plugin-settings>"
+			}
+		}
+	}
+}
+```
+
+**Legacy SSE (`/sse`) — for older clients:**
 
 ```json
 {
@@ -101,12 +122,13 @@ Claude Code automatically discovers and connects to Obsidian vaults through WebS
 
 ### A Note on MCP Specification Version
 
-_As of 2025-06-09_
-
-> [!IMPORTANT]
-> This plugin intentionally uses an older MCP specification for HTTP transport. The latest ["Streamable HTTP" protocol (2025-03-26)](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http) is not yet supported by most MCP clients, including Claude Code and Claude Desktop.
+> [!NOTE]
+> This plugin supports **both** the modern and legacy HTTP transports, and negotiates the protocol version per connection:
 >
-> To ensure compatibility, we use the legacy ["HTTP with SSE" protocol (2024-11-05)](https://modelcontextprotocol.io/specification/2024-11-05/basic/transports#http-with-sse). Adhering to the newest specification will lead to connection failures with current tools.
+> -   The [**Streamable HTTP** transport](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports) (MCP spec `2025-11-25`, introduced in `2025-03-26`) is served at `/mcp`.
+> -   The legacy ["**HTTP with SSE**" transport](https://modelcontextprotocol.io/specification/2024-11-05/basic/transports#http-with-sse) (MCP spec `2024-11-05`) is served at `/sse` + `/messages`, and remains available for clients that don't yet speak Streamable HTTP.
+>
+> Both endpoints run side by side, so newer clients get the current transport while older tools keep working. If your client doesn't support either transport directly (e.g. Claude Desktop), use the `mcp-remote` bridge shown above.
 
 ### Troubleshooting
 
@@ -141,6 +163,7 @@ This plugin implements a flexible tool system that allows different tools to be 
 1. **Shared Tools** (available to both IDE and MCP clients):
    - File operations: `view`, `str_replace`, `create`, `insert`
    - Workspace operations: `get_current_file`, `get_workspace_files`
+   - Knowledge-graph / metadata operations: `get_frontmatter`, `get_backlinks`, `get_outgoing_links`, `list_tags`, `find_by_tag`, `search_vault`
    - Obsidian API access: `obsidian_api`
 
 2. **IDE-specific Tools** (only available via Claude Code WebSocket):
@@ -148,9 +171,6 @@ This plugin implements a flexible tool system that allows different tools to be 
    - `openDiff` - Diff view operations (stub for Obsidian)
    - `close_tab` - Tab management (stub for Obsidian)
    - `closeAllDiffTabs` - Bulk tab operations (stub for Obsidian)
-
-3. **MCP-only Tools** (only available via HTTP/SSE):
-   - Currently none, but the architecture supports adding them
 
 ### Adding New Tools
 
@@ -161,21 +181,21 @@ To add a new tool to the plugin:
 2. Add the implementation in the `createImplementations()` method of `GeneralTools` class
 3. The tool will automatically be available to both WebSocket and HTTP clients
 
+#### For Metadata / Knowledge-Graph Tools (available to both IDE and MCP):
+1. Add the tool definition to `src/tools/metadata-tools.ts` in the `METADATA_TOOL_DEFINITIONS` array
+2. Add the implementation in the `createImplementations()` method of the `MetadataTools` class
+3. Registered to both registries via `src/mcp/dual-server.ts`, so the tool is available to both WebSocket and HTTP clients
+
 #### For IDE-specific Tools:
 1. Add the tool definition to `src/ide/ide-tools.ts` in the `IDE_TOOL_DEFINITIONS` array
 2. Add the implementation in the `createImplementations()` method of `IdeTools` class
 3. The tool will only be available to Claude Code via WebSocket
 
-#### For MCP-only Tools:
-1. Add the tool definition to `src/tools/mcp-only-tools.ts` in the `MCP_ONLY_TOOL_DEFINITIONS` array
-2. Create an implementation class similar to `GeneralTools` or `IdeTools`
-3. Update `src/mcp/dual-server.ts` to register the tools only to the HTTP registry
-
 ### Tool Registration Flow
 
 The plugin uses a dual registry system:
 - **WebSocket Registry**: Contains shared tools + IDE-specific tools
-- **HTTP Registry**: Contains shared tools + MCP-only tools
+- **HTTP Registry**: Contains the shared tools (all shared tools are registered to both registries)
 
 This separation ensures that:
 - Claude Code gets access to IDE-specific functionality
