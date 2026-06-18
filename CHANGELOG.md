@@ -1,5 +1,42 @@
 # Changelog
 
+## v1.1.14 — 2026-06-18 (Community-plugin gateway tools)
+
+Three new read-only tools let Claude reach through to popular Obsidian
+community plugins — but only when the backing plugin is actually installed
+and enabled. Implemented in `src/tools/plugin-tools.ts` and registered to
+both transports at server start; if a plugin is absent its tool simply never
+appears in `tools/list`, so there are no broken tools or errors.
+
+### New tools (each gated on its backing plugin)
+
+- **`omnisearch`** — ranked, relevance-sorted full-text search via the
+  [Omnisearch](https://github.com/scambier/obsidian-omnisearch) plugin.
+  Indexes non-markdown content too (PDFs, OCR'd images, Office docs, CSVs)
+  and returns matched-word lists. Default 20 results, hard cap 50. Prefer it
+  over `search_vault` for relevance queries or when the answer may live in a
+  PDF/image/spreadsheet.
+- **`extract_text`** — pull plain text out of a non-markdown file (PDF,
+  image via OCR, Word/Excel/PowerPoint) via the
+  [Text Extractor](https://github.com/scambier/obsidian-text-extractor)
+  plugin. Refuses markdown (use `view`). Output capped at 256 KB to keep a
+  large PDF from bloating a single MCP message.
+- **`dataview_query`** — run a Dataview DQL query (`TABLE`/`LIST`/`TASK`/
+  `CALENDAR`) via the
+  [Dataview](https://github.com/blacksmithgu/obsidian-dataview) plugin and
+  get formatted markdown back.
+
+### Implementation notes
+
+- `PluginTools` reads each plugin's public `.api` via the `app.plugins`
+  registry, returning a self-consistent `(definitions, implementations)`
+  pair filtered to the plugins present — `dual-server.ts` registers whatever
+  is available and logs which tools lit up.
+- All three are annotated read-only / non-destructive / idempotent and carry
+  the same response-size budgets as the hardened `search_vault`.
+- Full unit coverage in `tests/tools/plugin-tools.test.ts` plus integration
+  stress-harness cases; suite is 199 tests.
+
 ## v1.1.13 — 2026-06-18 (Configurable MCP server instructions)
 
 The MCP `initialize` response can carry an optional `instructions` string
