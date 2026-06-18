@@ -16,6 +16,13 @@ export interface ClaudeCodeSettings {
 	 * from the settings tab.
 	 */
 	mcpAuthToken: string;
+	/**
+	 * Optional server instructions string returned in the MCP `initialize`
+	 * response (the standard `instructions` field). Tells connecting clients
+	 * how to use the server. Blank by default — when empty, no `instructions`
+	 * field is sent. Editable from the settings tab.
+	 */
+	mcpInstructions: string;
 }
 
 export const DEFAULT_SETTINGS: ClaudeCodeSettings = {
@@ -26,6 +33,7 @@ export const DEFAULT_SETTINGS: ClaudeCodeSettings = {
 	enableHttpServer: true,
 	enableEmbeddedTerminal: true,
 	mcpAuthToken: "", // populated on first load
+	mcpInstructions: "", // optional; sent in MCP initialize only when set
 };
 
 /**
@@ -127,6 +135,39 @@ export class ClaudeCodeSettingTab extends PluginSettingTab {
 					if (this.plugin.settings.enableHttpServer) {
 						await this.plugin.restartMcpServer();
 						// Refresh the display to show updated status
+						this.display();
+					}
+				});
+			});
+
+		new Setting(containerEl)
+			.setName("MCP instructions")
+			.setDesc(
+				"Optional instructions sent to MCP clients in the initialize response. Leave blank to send nothing. Applies on the next client connection (the server restarts when you leave this field)."
+			)
+			.addTextArea((text) => {
+				text
+					.setPlaceholder(
+						"e.g. Before any task, open AGENTS.md (via the view tool) and follow it."
+					)
+					.setValue(this.plugin.settings.mcpInstructions)
+					.onChange(async (value) => {
+						// Save on change; defer the restart to blur.
+						this.plugin.settings.mcpInstructions = value;
+						await this.plugin.saveSettings();
+					});
+				text.inputEl.rows = 4;
+				text.inputEl.style.width = "100%";
+
+				// Restart only on blur, and only if the value actually changed,
+				// so the new handler instance picks up the edited string.
+				let lastValue = this.plugin.settings.mcpInstructions;
+				text.inputEl.addEventListener("blur", async () => {
+					if (text.getValue() === lastValue) return;
+					lastValue = text.getValue();
+					if (this.plugin.settings.enableHttpServer ||
+						this.plugin.settings.enableWebSocketServer) {
+						await this.plugin.restartMcpServer();
 						this.display();
 					}
 				});

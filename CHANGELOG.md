@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.1.13 — 2026-06-18 (Configurable MCP server instructions)
+
+The MCP `initialize` response can carry an optional `instructions` string
+that tells every connecting client/agent how to use the server. This
+release surfaces that field as a plugin setting rather than hard-coding it,
+so it can be set and updated from Obsidian without rebuilding.
+
+### Server instructions setting
+
+- New **MCP instructions** text area in Settings → MCP Server Configuration.
+  Whatever you enter is returned as `result.instructions` in the server's
+  `initialize` response to both transports (WebSocket and HTTP/SSE).
+- **Optional and blank by default.** When the field is empty the
+  `initialize` result omits the `instructions` key entirely — existing
+  behavior is unchanged for anyone who doesn't set it.
+- Edits save immediately; the MCP server restarts when you leave the field
+  so the new string is picked up. Instructions apply on the next client
+  connection, not retroactively to live sessions.
+- Plumbed through the existing config path
+  (`settings → DualServerConfig → McpHandlers`) with no changes to
+  transport, auth, ports, or tools.
+
 ## v1.1.12 — 2026-04-30 (Spec upgrade: support MCP `2025-11-25`)
 
 The plugin still implemented the `2024-11-05` wire format exclusively;

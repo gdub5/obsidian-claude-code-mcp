@@ -24,11 +24,18 @@ function notif(method: string, params?: any): McpRequest {
 	return out as McpRequest;
 }
 
-function makeHandlers() {
+function makeHandlers(instructions?: string) {
 	const app = new App();
 	const wsRegistry = new ToolRegistry();
 	const httpRegistry = new ToolRegistry();
-	const handlers = new McpHandlers(app as any, wsRegistry, httpRegistry);
+	const handlers = new McpHandlers(
+		app as any,
+		wsRegistry,
+		httpRegistry,
+		undefined,
+		undefined,
+		instructions
+	);
 	return { handlers, app, wsRegistry, httpRegistry };
 }
 
@@ -103,6 +110,37 @@ describe("McpHandlers", () => {
 			// should not advertise them until they're real.
 			expect(caps.prompts).toBeUndefined();
 			expect(caps.resources).toBeUndefined();
+		});
+
+		it("returns configured instructions in the initialize result", async () => {
+			const instructions =
+				"Before any task, open AGENTS.md and follow it.";
+			const { handlers } = makeHandlers(instructions);
+			const { reply, calls } = makeReply();
+
+			await handlers.handleHttpRequest(req("initialize", {}), reply);
+
+			expect(calls[0].result?.instructions).toBe(instructions);
+		});
+
+		it("omits the instructions key when none is configured", async () => {
+			const { handlers } = makeHandlers();
+			const { reply, calls } = makeReply();
+
+			await handlers.handleHttpRequest(req("initialize", {}), reply);
+
+			expect(calls[0].result?.instructions).toBeUndefined();
+			expect("instructions" in (calls[0].result as object)).toBe(false);
+		});
+
+		it("omits the instructions key when configured as an empty string", async () => {
+			const { handlers } = makeHandlers("");
+			const { reply, calls } = makeReply();
+
+			await handlers.handleHttpRequest(req("initialize", {}), reply);
+
+			expect(calls[0].result?.instructions).toBeUndefined();
+			expect("instructions" in (calls[0].result as object)).toBe(false);
 		});
 
 		it("reports a non-placeholder server version", async () => {

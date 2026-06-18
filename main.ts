@@ -73,6 +73,7 @@ export default class ClaudeMcpPlugin extends Plugin {
 				enableHttp: this.settings.enableHttpServer,
 				serverVersion: this.manifest.version,
 				authToken: this.settings.mcpAuthToken,
+				instructions: this.settings.mcpInstructions,
 			});
 
 			// Start services
