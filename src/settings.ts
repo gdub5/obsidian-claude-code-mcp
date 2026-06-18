@@ -140,12 +140,18 @@ export class ClaudeCodeSettingTab extends PluginSettingTab {
 				});
 			});
 
-		new Setting(containerEl)
+		const instructionsSetting = new Setting(containerEl)
 			.setName("MCP instructions")
 			.setDesc(
 				"Optional instructions sent to MCP clients in the initialize response. Leave blank to send nothing. Applies on the next client connection (the server restarts when you leave this field)."
-			)
-			.addTextArea((text) => {
+			);
+		// Stack the text area full-width BELOW the name/description rather
+		// than squeezing it into Obsidian's right-hand control column — the
+		// default row layout is too narrow for multi-line instructions.
+		instructionsSetting.settingEl.style.display = "block";
+		instructionsSetting.controlEl.style.width = "100%";
+		instructionsSetting.controlEl.style.paddingTop = "0.5em";
+		instructionsSetting.addTextArea((text) => {
 				text
 					.setPlaceholder(
 						"e.g. Before any task, open AGENTS.md (via the view tool) and follow it."
