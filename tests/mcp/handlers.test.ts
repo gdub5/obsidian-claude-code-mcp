@@ -143,6 +143,16 @@ describe("McpHandlers", () => {
 			expect("instructions" in (calls[0].result as object)).toBe(false);
 		});
 
+		it("omits the instructions key when configured as whitespace only", async () => {
+			const { handlers } = makeHandlers("   \n\t  ");
+			const { reply, calls } = makeReply();
+
+			await handlers.handleHttpRequest(req("initialize", {}), reply);
+
+			expect(calls[0].result?.instructions).toBeUndefined();
+			expect("instructions" in (calls[0].result as object)).toBe(false);
+		});
+
 		it("reports a non-placeholder server version", async () => {
 			const { handlers } = makeHandlers();
 			const { reply, calls } = makeReply();

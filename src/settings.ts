@@ -158,13 +158,27 @@ export class ClaudeCodeSettingTab extends PluginSettingTab {
 					});
 				text.inputEl.rows = 4;
 				text.inputEl.style.width = "100%";
+				// Cap length defensively. Instructions are short guidance
+				// text; this also bounds the per-connection `initialize`
+				// payload. Local-only trust model, so this is belt-and-suspenders.
+				text.inputEl.maxLength = 8192;
 
 				// Restart only on blur, and only if the value actually changed,
 				// so the new handler instance picks up the edited string.
+				// Normalize to the trimmed value on blur so what we store is
+				// exactly what the server sends — a whitespace-only string is
+				// treated as blank by the server, so persist it as blank too
+				// (avoids a stored-vs-sent mismatch).
 				let lastValue = this.plugin.settings.mcpInstructions;
 				text.inputEl.addEventListener("blur", async () => {
-					if (text.getValue() === lastValue) return;
-					lastValue = text.getValue();
+					const trimmed = text.getValue().trim();
+					if (trimmed !== text.getValue()) {
+						text.setValue(trimmed);
+					}
+					if (trimmed === lastValue) return;
+					lastValue = trimmed;
+					this.plugin.settings.mcpInstructions = trimmed;
+					await this.plugin.saveSettings();
 					if (this.plugin.settings.enableHttpServer ||
 						this.plugin.settings.enableWebSocketServer) {
 						await this.plugin.restartMcpServer();
